@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Aura Assistant — Local Docker Compose
+#
+# PURPOSE: Reproducible local dev environment.
+# NOTE:    For Phase 1 MVP, running natively (without Docker) is RECOMMENDED
+#          for GPU access. See README.md §Quick Start.
+#          This compose file is provided for CI and CPU-only testing.
+#
+# GPU PASS-THROUGH (requires nvidia-container-toolkit on the host):
+#   The `backend` service uses `deploy.resources.reservations.devices`
+#   to pass the RTX GPU through to the container.
+#   Verify with: docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
+#
+# USAGE:
+#   docker compose up --build           # first run
+#   docker compose up                   # subsequent runs
+#   docker compose down -v              # stop + remove volumes
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend
+    container_name: aura-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Model file is large (gitignored) — mount from host, not copied into image
+      - ./backend/models:/app/models:ro
+      # Piper voice models
+      - ./piper:/app/piper:ro
+      # Live-reload source during development
+      - ./backend:/app
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+    # ── GPU pass-through (remove this block for CPU-only mode) ──────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - aura-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s    # Allow 60s for model loading before health checks begin
+
+  # ── Vite Frontend Dev Server ───────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: aura-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules           # Prevent host node_modules from overwriting container's
+    env_file:
+      - ./frontend/.env.local
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - aura-net
+
+networks:
+  aura-net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile stubs — inline for convenience.
+# You can also extract these to backend/Dockerfile.backend etc.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# backend/Dockerfile.backend:
+# ─────────────────────────
+#   FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+#   RUN apt-get update && apt-get install -y python3.11 python3-pip curl build-essential
+#   WORKDIR /app
+#   COPY requirements.txt .
+#   RUN CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install --no-cache-dir -r requirements.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu121
+#   COPY . .
+#   CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+#
+# frontend/Dockerfile.frontend:
+# ─────────────────────────────
+#   FROM node:20-alpine
+#   WORKDIR /app
+#   COPY package.json package-lock.json* ./
+#   RUN npm install
+#   COPY . .
+#   EXPOSE 5173
+#   CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

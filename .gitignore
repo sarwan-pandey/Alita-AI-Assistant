@@ -1,0 +1,84 @@
+# ── Python ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environment ───────────────────────────
+venv/
+.venv/
+env/
+
+# ── Environment / Secrets ─────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── IDE ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Models & Data (large files) ───────────────────
+models/
+*.onnx
+*.bin
+*.gguf
+piper/
+
+# ── User data & training exports ──────────────────
+data/conversations/
+data/training/
+
+# ── Node modules ──────────────────────────────────
+node_modules/
+frontend/node_modules/
+
+# ── Build output ──────────────────────────────────
+frontend/dist/
+
+# ── OS files ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ──────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Extra safety: explicit .env paths ─────────────
+backend/.env
+frontend/.env
+
+# ── Frontend build cache ─────────────────────────
+frontend/.vite/
+
+# ── Whisper model cache ───────────────────────────
+whisper_cache/
+
+# ── ChromaDB vector store data ────────────────────
+chroma_data/
+
+# ── Certificates & private keys ───────────────────
+*.pem
+*.key
+*.crt
+*.p12
+
+# ── Audio test files (avoid committing recordings) ─
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# ── Real API keys backup (restore after upload) ──
+.keys_backup.json
+
+# ── Gemini agent artifacts ────────────────────────
+.gemini/

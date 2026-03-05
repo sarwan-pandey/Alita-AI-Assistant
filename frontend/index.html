@@ -1,0 +1,70 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Alita — An emotionally intelligent AI assistant." />
+  <meta name="theme-color" content="#050507" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/manifest.json" />
+
+  <!--
+      COOP/COEP headers are set in vite.config.js during dev.
+      For production, your reverse proxy (nginx/caddy) must set:
+        Cross-Origin-Opener-Policy: same-origin
+        Cross-Origin-Embedder-Policy: credentialless
+      These are required for:
+        - SharedArrayBuffer  (AudioWorklet ring buffer)
+        - WebAssembly SIMD   (MediaPipe tasks-vision GPU delegate)
+    -->
+
+  <title>Alita</title>
+
+  <!--
+      Preconnect to font CDN for faster Cormorant Garamond + DM Mono load.
+      App.css imports these via @import; preconnect removes DNS lookup latency.
+    -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+  <!-- Leaflet.js for Nearest Stores map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <!-- Favicon: minimal SVG circle in brand accent color — no file needed -->
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%23c084fc' opacity='0.9'/></svg>" />
+</head>
+
+<body>
+  <!--
+      #root is the React mount point.
+      overflow:hidden + height:100dvh prevents mobile scroll bounce
+      from fighting the full-screen Three.js canvas.
+    -->
+  <div id="root" style="height: 100dvh; overflow: hidden;"></div>
+
+  <!--
+      Vite injects the <script type="module"> bundle here automatically.
+      Do NOT add a manual <script> tag for main.jsx.
+    -->
+  <script type="module" src="/src/main.jsx"></script>
+  <script>
+    // Register service worker for PWA
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').then(reg => {
+          console.log('[PWA] Service worker registered:', reg.scope);
+        }).catch(err => {
+          console.log('[PWA] SW registration failed:', err);
+        });
+      });
+    }
+  </script>
+</body>
+
+</html>
