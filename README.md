@@ -55,8 +55,8 @@ Follow these steps exactly and in order.
 
 ### Step 1 — Clone and enter the repo
 ```bash
-git clone https://github.com/YOUR_USERNAME/aura-assistant.git
-cd aura-assistant
+https://github.com/sarwan-pandey/Alita-AI-Assistant.git
+cd Alita-AI-Assistant
 ```
 
 ---
