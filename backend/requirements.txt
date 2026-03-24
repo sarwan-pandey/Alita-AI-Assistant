@@ -12,7 +12,12 @@ passlib[bcrypt]==1.7.4
 pydantic-settings==2.2.1
 python-dotenv==1.0.1
 
-# ── LLM Engine (llama.cpp with cuBLAS for CUDA 12.1) ─────────
+# ── LLM APIs ─────────────────────────────────────────────────
+google-generativeai>=0.8.0
+groq>=0.11.0
+openai>=1.30.0
+
+# ── LLM Engine (llama.cpp — optional, for local models) ──────
 # Install with: CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python
 llama-cpp-python==0.2.77
 
@@ -21,10 +26,10 @@ faster-whisper==1.0.3
 
 # ── SER Engine ────────────────────────────────────────────────
 transformers==4.41.2
-# torch==2.3.0+cu121  ; sys_platform != "darwin"
-# torchaudio==2.3.0+cu121  ; sys_platform != "darwin"
-# torchvision==0.18.0+cu121  ; sys_platform != "darwin"
 accelerate==0.30.1
+# PyTorch CPU-only (keeps image small, no CUDA needed in cloud)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.0+cpu
 
 # ── TTS (Voice Synthesis) ──────────────────────────────────────
 # Edge TTS for cloud neural voices:
@@ -41,8 +46,8 @@ chromadb==0.5.0
 sentence-transformers==3.0.0
 
 # ── Payments ──────────────────────────────────────────────────
-stripe==9.12.0
+razorpay>=1.4.0
 
 # ── Database (Supabase server-side) ───────────────────────────
 supabase==2.5.0
-httpx==0.27.0
+httpx==0.27.0
