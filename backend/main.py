@@ -648,14 +648,15 @@ def _load_engines_sync() -> None:
         log.warning("ChromaDB init failed (memory disabled): %s", exc)
         engines.memory_collection = None
 
-    # ── §5b  faster-whisper base (multilingual: Hindi + English) ───────────
-    log.info("Loading Whisper small (multilingual) via faster-whisper for Indian accent support…")
+    # ── §5b  faster-whisper (multilingual: Hindi + English) ─────────────────
+    _whisper_size = os.getenv("WHISPER_MODEL", "tiny")  # tiny=75MB, small=500MB
+    log.info("Loading Whisper %s (multilingual) via faster-whisper…", _whisper_size)
     try:
         from faster_whisper import WhisperModel  # type: ignore[import-untyped]
         compute = "float16" if settings.device == "cuda" else "int8"
         try:
             engines.whisper_model = WhisperModel(
-                "small",
+                _whisper_size,
                 device=settings.device,
                 compute_type=compute,
                 download_root="./models/whisper_cache",
@@ -665,7 +666,7 @@ def _load_engines_sync() -> None:
             if compute == "int8":
                 log.warning("int8 failed (%s), falling back to float32 on CPU…", inner)
                 engines.whisper_model = WhisperModel(
-                    "small",
+                    _whisper_size,
                     device="cpu",
                     compute_type="float32",
                     download_root="./models/whisper_cache",
@@ -673,7 +674,7 @@ def _load_engines_sync() -> None:
             else:
                 raise
         engines.whisper_processor = True  # type: ignore[assignment]  # sentinel flag for faster-whisper
-        log.info("✓ Whisper small loaded on %s (Indian accent optimized).", settings.device)
+        log.info("✓ Whisper %s loaded on %s.", _whisper_size, settings.device)
     except Exception as exc:
         log.error("✗ Failed to load Whisper: %s", exc)
 
