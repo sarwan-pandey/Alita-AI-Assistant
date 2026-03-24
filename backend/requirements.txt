@@ -26,9 +26,13 @@ transformers==4.41.2
 # torchvision==0.18.0+cu121  ; sys_platform != "darwin"
 accelerate==0.30.1
 
-# ── TTS (Piper via subprocess) ────────────────────────────────
-# piper-tts is invoked as a binary; no pip package needed.
-# Include soundfile for audio response encoding:
+# ── TTS (Voice Synthesis) ──────────────────────────────────────
+# Edge TTS for cloud neural voices:
+edge-tts>=6.1.0
+# XTTS v2 for local GPU voice cloning:
+TTS>=0.22.0
+# Audio format conversion:
+pydub>=0.25.1
 soundfile==0.12.1
 numpy==1.26.4
 

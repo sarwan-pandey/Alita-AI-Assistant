@@ -103,8 +103,18 @@ export function useWebSocket({ token, onMessage, enabled }) {
     wsRef.current.send(JSON.stringify(chunkData));
   }, []);
 
-  const sendTextMessage = useCallback((text) => {
+  // Send raw binary data (ArrayBuffer) — 8× more efficient for PCM audio
+  const sendBinaryChunk = useCallback((arrayBuffer) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(arrayBuffer);
+  }, []);
+
+  const sendTextMessage = useCallback((text) => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      console.warn("[WS] sendTextMessage blocked — WS not open. State:", wsRef.current?.readyState);
+      return;
+    }
+    console.log("[WS] Sending text_message:", text.slice(0, 50));
     wsRef.current.send(JSON.stringify({
       type: "text_message",
       text,
@@ -126,5 +136,40 @@ export function useWebSocket({ token, onMessage, enabled }) {
     }));
   }, []);
 
-  return { sendAudioChunk, sendTextMessage, sendDictation, sendDictationStop, wsStatus };
+  const sendBargeIn = useCallback((partialResponse, originalQuery) => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    console.log("[WS] Sending barge_in: partial=%d chars, query='%s'",
+      (partialResponse || "").length, (originalQuery || "").slice(0, 40));
+    wsRef.current.send(JSON.stringify({
+      type: "barge_in",
+      partial_response: partialResponse || "",
+      original_query: originalQuery || "",
+    }));
+  }, []);
+
+  // ── Speculative pre-generation ─────────────────────────────────────────
+  // Sends interim transcript to backend so it can START generating a response
+  // before the user finishes speaking. If the final transcript matches,
+  // the response is already partially/fully cached → near-instant reply.
+  const speculativeIdRef = useRef(0);
+
+  const sendSpeculativeQuery = useCallback((interimText) => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    const specId = ++speculativeIdRef.current;
+    console.log("[WS] Speculative query #%d: '%s'", specId, interimText.slice(0, 60));
+    wsRef.current.send(JSON.stringify({
+      type: "speculative_query",
+      text: interimText,
+      spec_id: specId,
+    }));
+  }, []);
+
+  const cancelSpeculative = useCallback(() => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      type: "cancel_speculative",
+    }));
+  }, []);
+
+  return { sendAudioChunk, sendBinaryChunk, sendTextMessage, sendDictation, sendDictationStop, sendBargeIn, sendSpeculativeQuery, cancelSpeculative, wsStatus };
 }

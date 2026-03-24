@@ -296,13 +296,15 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                                     <div className="voice-option-right">
                                         {/* Preview button */}
                                         {isAvailable && !isLocked && (
-                                            <button
+                                            <span
+                                                role="button"
+                                                tabIndex={0}
                                                 className={`voice-preview-btn ${isPreviewing ? "playing" : ""}`}
                                                 onClick={(e) => handlePreview(voice.id, e)}
                                                 title="Preview voice"
                                             >
                                                 {isPreviewing ? "◼" : "▶"}
-                                            </button>
+                                            </span>
                                         )}
                                         {voice.quality === "high" && (
                                             <span className="voice-quality-badge">HD</span>

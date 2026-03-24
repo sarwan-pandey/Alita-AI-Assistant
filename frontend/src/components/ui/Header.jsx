@@ -22,10 +22,11 @@ const THEME_LABELS = {
     auto: "Auto",
 };
 
-export function Header({ user, tier, onLogout, theme, onThemeCycle, notifications }) {
+const PREMIUM_FEATURE_COUNT = 13;
+
+export function Header({ user, tier, onLogout, theme, onThemeCycle, notifications, isTrialActive, trialDaysRemaining, isPremium, onShowPricing }) {
     const displayName = user?.email?.split("@")[0] || user?.id || "User";
     const initials = displayName.slice(0, 2).toUpperCase();
-    const isPremium = tier === "premium";
 
     const [notifOpen, setNotifOpen] = useState(false);
     const notifRef = useRef(null);
@@ -62,6 +63,28 @@ export function Header({ user, tier, onLogout, theme, onThemeCycle, notification
                     <span className="dash-header-username">{displayName}</span>
                 </div>
             </div>
+
+            {/* Center: Upsell / Trial CTA (clickable, opens pricing) */}
+            {onShowPricing && !isPremium && (
+                <button
+                    className="header-upsell-btn"
+                    onClick={onShowPricing}
+                    id="header-upsell"
+                >
+                    {isTrialActive ? (
+                        <>
+                            <span className="upsell-gem">✨</span>
+                            <span>Unlock {PREMIUM_FEATURE_COUNT} Premium Features</span>
+                            <span className="upsell-trial-badge">{trialDaysRemaining}d trial</span>
+                        </>
+                    ) : (
+                        <>
+                            <span className="upsell-gem">💎</span>
+                            <span>Unlock {PREMIUM_FEATURE_COUNT} Premium Features</span>
+                        </>
+                    )}
+                </button>
+            )}
 
             {/* Right: Controls */}
             <div className="dash-header-right">
@@ -132,10 +155,15 @@ export function Header({ user, tier, onLogout, theme, onThemeCycle, notification
                     </span>
                 </button>
 
-                {/* Tier badge */}
-                <div className={`dash-premium-badge ${isPremium ? "" : "free"}`}>
-                    <span className="dash-premium-gem">{isPremium ? "💎" : "◇"}</span>
-                    <span>{isPremium ? "PREMIUM" : "FREE"}</span>
+                {/* Tier badge — now shows PREMIUM / TRIAL / FREE */}
+                <div
+                    className={`dash-premium-badge ${isPremium ? "" : isTrialActive ? "trial" : "free"}`}
+                    onClick={onShowPricing}
+                    style={{ cursor: onShowPricing ? "pointer" : "default" }}
+                    title={isPremium ? "Premium active" : isTrialActive ? `Trial: ${trialDaysRemaining} days remaining` : "Free plan — click to upgrade"}
+                >
+                    <span className="dash-premium-gem">{isPremium ? "💎" : isTrialActive ? "✨" : "◇"}</span>
+                    <span>{isPremium ? "PREMIUM" : isTrialActive ? `TRIAL ${trialDaysRemaining}d` : "FREE"}</span>
                 </div>
 
                 {/* Logout */}

@@ -24,19 +24,28 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ["@mediapipe/tasks-vision"],  // WASM bundle — must not be pre-bundled
+    exclude: [
+      "@mediapipe/tasks-vision",
+      "onnxruntime-web",
+    ], // WASM/ONNX bundles — must not be pre-bundled
   },
   build: {
     target: "esnext",
-    sourcemap: false,  // Avoid source-map errors from mediapipe
+    sourcemap: false, // Avoid source-map errors from mediapipe
+    // SECURITY: Strip all console.* and debugger statements from production
+    minify: 'esbuild',
     rollupOptions: {
       output: {
         manualChunks: {
-          "three": ["three"],
-          "r3f": ["@react-three/fiber", "@react-three/drei"],
-          "mediapipe": ["@mediapipe/tasks-vision"],
+          three: ["three"],
+          r3f: ["@react-three/fiber", "@react-three/drei"],
+          mediapipe: ["@mediapipe/tasks-vision"],
         },
       },
     },
+  },
+  esbuild: {
+    // Strip console.log/warn/error/debug and debugger from production builds
+    drop: process.env.NODE_ENV === 'production' ? ['console', 'debugger'] : [],
   },
 });

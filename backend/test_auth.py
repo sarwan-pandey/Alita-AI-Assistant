@@ -3,30 +3,31 @@ test_auth.py — Drop into backend/ folder.
 Provides a /auth/test-login endpoint for beta testers.
 
 HOW IT WORKS:
-  - You define test accounts in TEST_USERS dict below (ID + password)
+  - Test account password hashes are loaded from environment variables
   - Tester visits the login page, clicks "Beta Access", enters credentials
   - Backend returns a real signed JWT valid for 24 hours
   - JWT is accepted by the main WebSocket auth (same decode_supabase_jwt logic)
-  - You can grant premium tier to specific testers
 
 SECURITY:
+  - Set DISABLE_TEST_AUTH=true in production to completely disable this endpoint
   - Tokens expire after 24 hours
   - Signed with SUPABASE_JWT_SECRET so they pass the same HS256 verification
-  - No Supabase or Google account needed
   - Rate limited: max 5 attempts per IP per minute
+  - Password hashes are stored in env vars, NOT in source code
 
-ADDING TESTERS:
-  - Add entries to TEST_USERS below
-  - Use strong random passwords (share via WhatsApp/Signal, not email)
-  - Set tier to "premium" for premium access testers
-
-HOW TO USE:
-  Add this line to main.py imports:
-    from test_auth import test_auth_router
-  Add this line after app = FastAPI(...):
-    app.include_router(test_auth_router)
+SETUP (one-time):
+  1. Pick usernames and passwords for testers
+  2. Generate SHA-256 hashes:
+     python -c "import hashlib; print(hashlib.sha256(b'YourPassword').hexdigest())"
+  3. Set environment variables:
+     TEST_USER_BETA01_HASH=<sha256 hash>
+     TEST_USER_BETA01_TIER=premium
+     TEST_USER_DEMO_HASH=<sha256 hash>
+     TEST_USER_DEMO_TIER=free
+  4. Share username + original password with tester (NOT the hash)
 """
 
+import os
 import time
 import hashlib
 import secrets
@@ -38,43 +39,28 @@ from jose import jwt
 from pydantic import BaseModel
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST USER ACCOUNTS
-# Format: "username": {"password_hash": sha256(password), "tier": "free"|"premium"}
-#
-# To add a tester:
-#   1. Pick a username (e.g. "tester1") and password (e.g. "Aura#2024!")
-#   2. Generate hash: python -c "import hashlib; print(hashlib.sha256(b'Aura#2024!').hexdigest())"
-#   3. Add entry below
-#   4. Share username + original password with your tester (NOT the hash)
-#
-# Pre-built test accounts (change passwords before sharing!):
-#
-#   username: beta01  |  password: AuraBeta@01  |  tier: premium
-#   username: beta02  |  password: AuraBeta@02  |  tier: premium
-#   username: demo    |  password: AuraDemo#99  |  tier: free
+# TEST USER ACCOUNTS — loaded from environment variables
+# Format: TEST_USER_<USERNAME>_HASH = sha256 hex digest of password
+#         TEST_USER_<USERNAME>_TIER = "free" or "premium"
+#         TEST_USER_<USERNAME>_NAME = display name (optional)
 # ─────────────────────────────────────────────────────────────────────────────
-TEST_USERS: Dict[str, dict] = {
-    "beta01": {
-        "password_hash": hashlib.sha256(b"AuraBeta@01").hexdigest(),
-        "tier":          "premium",
-        "display_name":  "Beta Tester 1",
-    },
-    "beta02": {
-        "password_hash": hashlib.sha256(b"AuraBeta@02").hexdigest(),
-        "tier":          "premium",
-        "display_name":  "Beta Tester 2",
-    },
-    "beta03": {
-        "password_hash": hashlib.sha256(b"AuraBeta@03").hexdigest(),
-        "tier":          "premium",
-        "display_name":  "Beta Tester 3",
-    },
-    "demo": {
-        "password_hash": hashlib.sha256(b"AuraDemo#99").hexdigest(),
-        "tier":          "free",
-        "display_name":  "Demo User",
-    },
-}
+def _load_test_users() -> Dict[str, dict]:
+    """Load test user accounts from environment variables."""
+    users: Dict[str, dict] = {}
+    # Scan environment for TEST_USER_*_HASH patterns
+    seen_usernames = set()
+    for key, value in os.environ.items():
+        if key.startswith("TEST_USER_") and key.endswith("_HASH"):
+            username = key[10:-5].lower()  # TEST_USER_BETA01_HASH → beta01
+            seen_usernames.add(username)
+            users[username] = {
+                "password_hash": value.strip(),
+                "tier": os.getenv(f"TEST_USER_{username.upper()}_TIER", "free"),
+                "display_name": os.getenv(f"TEST_USER_{username.upper()}_NAME", f"Tester {username}"),
+            }
+    return users
+
+TEST_USERS: Dict[str, dict] = _load_test_users()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Rate limiter — simple in-memory (5 attempts per IP per 60 seconds)
@@ -119,7 +105,12 @@ async def test_login(body: TestLoginRequest, request: Request):
     """
     Authenticate a beta tester and return a signed JWT.
     The JWT is accepted by the main /ws WebSocket endpoint.
+    Disabled when DISABLE_TEST_AUTH=true is set in environment.
     """
+    # ── Production kill switch ────────────────────────────────────────
+    if os.getenv("DISABLE_TEST_AUTH", "").lower() in ("true", "1", "yes"):
+        raise HTTPException(status_code=404, detail="Not found")
+
     # Get client IP for rate limiting
     ip = request.client.host if request.client else "unknown"
     _check_rate_limit(ip)
@@ -127,8 +118,11 @@ async def test_login(body: TestLoginRequest, request: Request):
     # Normalise username
     username = body.username.strip().lower()
 
+    # Reload users in case env vars changed (hot-reload friendly)
+    current_users = _load_test_users() if not TEST_USERS else TEST_USERS
+
     # Look up user
-    user = TEST_USERS.get(username)
+    user = current_users.get(username)
     if not user:
         # Constant-time compare even for missing user (prevents username enumeration)
         secrets.compare_digest("dummy", "hash")
@@ -146,13 +140,16 @@ async def test_login(body: TestLoginRequest, request: Request):
         )
 
     # Import settings from main.py context
-    # (test_auth.py is imported by main.py so settings is accessible)
     try:
         from main import settings
         jwt_secret = settings.supabase_jwt_secret
     except Exception:
-        import os
-        jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "placeholder")
+        jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "")
+        if not jwt_secret:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server configuration error.",
+            )
 
     now = int(time.time())
 
@@ -161,10 +158,10 @@ async def test_login(body: TestLoginRequest, request: Request):
         "sub":          f"test_{username}",          # user_id
         "email":        f"{username}@aura.test",
         "role":         "authenticated",
-        "iss":          "https://test.supabase.co",  # iss must contain supabase.co
+        "iss":          "https://test.supabase.co",
         "iat":          now,
         "exp":          now + 86400,                 # 24h expiry
-        "tier":         user["tier"],                # passed through for convenience
+        "tier":         user["tier"],
         "is_test_user": True,
     }
 
@@ -174,21 +171,4 @@ async def test_login(body: TestLoginRequest, request: Request):
         access_token=token,
         tier=user["tier"],
         display_name=user["display_name"],
-    )
-
-
-@test_auth_router.get("/test-users")
-async def list_test_users():
-    """
-    Returns list of test usernames (no passwords/hashes).
-    ONLY available in development (set DEBUG=1 in .env).
-    """
-    import os
-    if not os.getenv("DEBUG", ""):
-        raise HTTPException(status_code=404, detail="Not found")
-    return {
-        "users": [
-            {"username": u, "tier": v["tier"], "display_name": v["display_name"]}
-            for u, v in TEST_USERS.items()
-        ]
-    }
+    )

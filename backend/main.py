@@ -1,4 +1,4 @@
-﻿"""
+"""
 Alita Assistant — FastAPI Backend  (main.py)
 ============================================
 All fixes applied:
@@ -12,8 +12,8 @@ All fixes applied:
   8.  Server-side tier enforcement in pipeline         (can't bypass via DevTools)
   9.  Rate limiting per session                        (free=10/min, premium=60/min)
  10.  Windows Piper .exe path support
- 11.  Stripe monthly ($19) + annual ($209) plan handling
- 12.  invoice.payment_failed event handled
+ 11.  Razorpay monthly ($99) + annual ($1100) plan handling
+ 12.  payment.failed event handled
 """
 
 from __future__ import annotations
@@ -25,8 +25,12 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Dict
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+
+# ── Load .env FIRST — so os.environ has keys before groq_pool imports ────────
+from dotenv import load_dotenv  # type: ignore[import-untyped]
+load_dotenv(override=True)
 
 # ── §0  Set up ffmpeg for pydub (song recognition) ───────────────────────────
 # pydub needs ffmpeg to convert audio formats. If ffmpeg is not on PATH,
@@ -35,11 +39,11 @@ try:
     import shutil
     if not shutil.which("ffmpeg"):
         try:
-            import imageio_ffmpeg
+            import imageio_ffmpeg  # type: ignore[import-untyped]
             _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             os.environ["PATH"] = os.path.dirname(_ffmpeg_exe) + os.pathsep + os.environ.get("PATH", "")
             # Also tell pydub explicitly where ffmpeg is
-            from pydub import AudioSegment
+            from pydub import AudioSegment  # type: ignore[import-untyped]
             AudioSegment.converter = _ffmpeg_exe
             AudioSegment.ffprobe = _ffmpeg_exe  # ffprobe isn't needed but prevents warning
         except ImportError:
@@ -47,12 +51,12 @@ try:
 except Exception:
     pass
 
-import httpx
-import numpy as np
-import stripe
-import torch
-import uvicorn
-from fastapi import (
+import httpx  # type: ignore[import-untyped]
+import numpy as np  # type: ignore[import-untyped]
+import razorpay  # type: ignore[import-untyped]
+import torch  # type: ignore[import-untyped]
+import uvicorn  # type: ignore[import-untyped]
+from fastapi import (  # type: ignore[import-untyped]
     FastAPI,
     HTTPException,
     Request,
@@ -60,14 +64,14 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from jose import JWTError, jwk, jwt
-from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from test_auth import test_auth_router
-from routers.youtube_search import youtube_router
-from memory.conversation_store import (
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-untyped]
+from fastapi.responses import JSONResponse  # type: ignore[import-untyped]
+from jose import JWTError, jwk, jwt  # type: ignore[import-untyped]
+from pydantic import BaseModel, Field  # type: ignore[import-untyped]
+from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore[import-untyped]
+from test_auth import test_auth_router  # type: ignore[import]
+from routers.youtube_search import youtube_router  # type: ignore[import]
+from memory.conversation_store import (  # type: ignore[import]
     save_turn,
     load_history,
     rebuild_transcript_buffer,
@@ -79,14 +83,14 @@ from memory.conversation_store import (
 # §0  FFMPEG SETUP (must run before pydub/shazamio imports)
 # ─────────────────────────────────────────────────────────────────────────────
 try:
-    import imageio_ffmpeg as _ioff
+    import imageio_ffmpeg as _ioff  # type: ignore[import-untyped]
     _ffmpeg_exe = _ioff.get_ffmpeg_exe()
     _ffmpeg_dir = os.path.dirname(_ffmpeg_exe)
     if _ffmpeg_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
     # Also configure pydub to use this ffmpeg
     try:
-        from pydub import AudioSegment
+        from pydub import AudioSegment  # type: ignore[import-untyped]
         AudioSegment.converter = _ffmpeg_exe
     except ImportError:
         pass
@@ -106,6 +110,44 @@ log = logging.getLogger("Alita.main")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# §0b  STARTUP DEPENDENCY CHECK — Fail fast if critical packages are missing
+# ─────────────────────────────────────────────────────────────────────────────
+import sys as _sys
+
+_missing_packages = []
+try:
+    import groq  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    _missing_packages.append("groq")
+try:
+    import google.generativeai  # noqa: F401  # type: ignore[import-untyped]
+except ImportError:
+    _missing_packages.append("google-generativeai")
+
+if _missing_packages:
+    _venv_hint = (
+        "It looks like you're running with the SYSTEM Python instead of the virtual environment.\n"
+        f"  Current Python: {_sys.executable}\n"
+        "  \n"
+        "  FIX: Activate the venv first, then run the server:\n"
+        "    .\\venv\\Scripts\\Activate.ps1          (PowerShell)\n"
+        "    .\\venv\\Scripts\\activate.bat           (CMD)\n"
+        "    source venv/bin/activate               (Linux/Mac)\n"
+        "    python -m uvicorn main:app --reload\n"
+        "  \n"
+        f"  Missing packages: {', '.join(_missing_packages)}\n"
+        "  Or install them manually:  pip install " + " ".join(_missing_packages) + "\n"
+    )
+    log.error("\n" + "=" * 70)
+    log.error("CRITICAL: Required LLM packages are NOT installed!")
+    log.error("=" * 70)
+    log.error(_venv_hint)
+    log.error("=" * 70)
+    log.error("The assistant WILL NOT be able to respond until this is fixed.")
+    log.error("=" * 70 + "\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # §1  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 class Settings(BaseSettings):
@@ -120,10 +162,13 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     supabase_url: str        = ""
 
-    # ── Payments ──────────────────────────────────────────────────────────
-    stripe_webhook_secret: str   = ""
-    admin_secret: str            = ""          # protect admin endpoints — set in .env
-    stripe_secret_key: str     = ""
+    # ── Payments (Razorpay) ─────────────────────────────────────────────────
+    razorpay_key_id: str           = ""          # rzp_test_xxx or rzp_live_xxx
+    razorpay_key_secret: str       = ""
+    razorpay_webhook_secret: str   = ""
+    admin_secret: str              = ""          # protect admin endpoints — set in .env
+    razorpay_plan_monthly: str     = ""          # Razorpay Plan ID for $99/mo
+    razorpay_plan_annual: str      = ""          # Razorpay Plan ID for $1100/yr
 
     # ── LLM ───────────────────────────────────────────────────────────────
     gemini_api_key: str      = ""       # Primary Gemini API key
@@ -137,9 +182,9 @@ class Settings(BaseSettings):
     gemini_api_key_9: str    = ""
     gemini_api_key_10: str   = ""
     gemini_model: str        = "gemini-2.0-flash"  # fast + great Hindi
-    llm_max_tokens: int      = 512      # premium
-    llm_max_tokens_free: int = 256      # free  — enforced server-side
-    llm_temperature: float   = 0.7
+    llm_max_tokens: int      = 300      # premium — adaptive per query type
+    llm_max_tokens_free: int = 200      # free — adaptive per query type
+    llm_temperature: float   = 0.6      # balanced creativity + speed
 
     # ── Groq (free fallback LLM) ──────────────────────────────────────────
     groq_api_key: str        = ""       # Get from https://console.groq.com/keys
@@ -147,6 +192,14 @@ class Settings(BaseSettings):
     groq_api_key_3: str      = ""
     groq_api_key_4: str      = ""
     groq_model: str          = "llama-3.3-70b-versatile"  # Free, fast, smart
+
+    # ── DeepSeek (high-accuracy LLM, excellent medical knowledge) ────────
+    deepseek_api_key: str    = ""       # Get free at https://platform.deepseek.com
+    deepseek_model: str      = "deepseek-chat"  # DeepSeek-V3, 10M free tokens/mo
+
+    # ── NVIDIA Build (Nemotron 3 Super — 120B MoE, agentic reasoning) ─
+    nvidia_api_key: str      = ""       # Get free at https://build.nvidia.com
+    nvidia_model: str        = "nvidia/nemotron-3-super-120b-a12b"  # 120B MoE, 12B active
 
     def get_all_gemini_keys(self) -> list[str]:
         """Return list of all non-empty Gemini API keys."""
@@ -229,7 +282,7 @@ class GeminiKeyRotator:
             if now >= cooldown_until:
                 self.total_calls[idx] = self.total_calls.get(idx, 0) + 1
                 self.index = (idx + 1) % len(self.keys)
-                masked = self.keys[idx][:8] + '...'
+                masked = self.keys[idx][:8] + '...'  # type: ignore[index]
                 log.debug("Using Gemini key #%d (%s) — call #%d",
                           idx + 1, masked, self.total_calls[idx])
                 return self.keys[idx]
@@ -237,7 +290,7 @@ class GeminiKeyRotator:
             self.index = (idx + 1) % len(self.keys)
 
         # All keys are on cooldown — use the one with shortest wait
-        soonest = min(self.cooldowns, key=self.cooldowns.get)
+        soonest = min(self.cooldowns, key=lambda k: self.cooldowns.get(k, 0))
         self.total_calls[soonest] = self.total_calls.get(soonest, 0) + 1
         return self.keys[soonest]
 
@@ -257,7 +310,7 @@ class GeminiKeyRotator:
             "total_keys": len(self.keys),
             "available": sum(1 for i in range(len(self.keys))
                           if now >= self.cooldowns.get(i, 0)),
-            "calls": dict(self.total_calls),
+            "calls": dict(self.total_calls),  # type: ignore[arg-type]
         }
 
 
@@ -265,7 +318,7 @@ key_rotator = GeminiKeyRotator(_all_keys)
 
 
 # ── Groq Key Rotator (shared module) ─────────────────────────────────────
-from groq_pool import get_rotator as _get_groq_rotator
+from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
 groq_rotator = _get_groq_rotator()
 log.info("Groq API Keys: %d loaded", len(groq_rotator.keys))
 
@@ -297,22 +350,22 @@ class ResponseCache:
                 log.debug("Cache HIT (hits=%d, misses=%d)", self.hits, self.misses)
                 return response
             else:
-                del self.cache[h]  # Expired
+                del self.cache[h]  # Expired  # type: ignore[attr-defined]
         self.misses += 1
         return None
 
     def put(self, query: str, response: str):
         # Evict oldest if at capacity
         if len(self.cache) >= self.max_entries:
-            oldest_key = min(self.cache, key=lambda k: self.cache[k][0])
-            del self.cache[oldest_key]
+            oldest_key = min(self.cache, key=lambda k: self.cache[k][0])  # type: ignore[index]
+            del self.cache[oldest_key]  # type: ignore[attr-defined]
         self.cache[self._hash(query)] = (time.time(), response)
 
     def status(self) -> dict:
         return {"entries": len(self.cache), "hits": self.hits, "misses": self.misses}
 
 
-response_cache = ResponseCache(ttl_seconds=300)
+response_cache = ResponseCache(ttl_seconds=900, max_entries=500)  # 15min TTL, 500 entries for speed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,6 +425,31 @@ class SessionRecord(BaseModel):
     # dictation mode (for typing into apps like notepad)
     dictation_active: bool = False
     dictation_app: str     = ""
+    # ── Near-sentient personality state ────────────────────────────────────
+    current_emotion: str         = "neutral"
+    emotion_confidence: float    = 0.0
+    environment_sounds: list     = Field(default_factory=list)
+    interaction_count: int       = 0
+    emergency_active: bool       = False
+    # ── Song memory — persists across conversation turns ───────────────────
+    last_identified_song: str    = ""   # e.g. "Blinding Lights by The Weeknd (album: After Hours)"
+    # ── Barge-in context — remembers what Alita was saying when interrupted ────
+    interrupted_response: str    = ""   # partial response Alita was speaking
+    interrupted_query: str       = ""   # original user query that triggered the response
+    barge_in_count: int          = 0    # number of barge-ins this session
+    pipeline_cancel: bool        = False  # flag to cancel active pipeline
+    active_pipeline_id: str      = ""   # ID of currently running pipeline
+    # ── Threading cancel event for instant mid-LLM abort ────────────────────
+    cancel_event: Any            = Field(default=None)  # threading.Event, set by barge-in
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        import threading
+        if self.cancel_event is None:
+            object.__setattr__(self, 'cancel_event', threading.Event())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,17 +457,13 @@ class SessionRecord(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 class EngineRegistry:
     """
-    VRAM budget:
-      CPU mode  (now, no CUDA):
-        All models run in RAM — 0 VRAM used.
-
-      GPU mode  (after CUDA 12.1 install):
-        Phi-3 Mini 4-bit (28 layers) ≈ 2.10 GB
-        faster-whisper  tiny FP16    ≈ 0.08 GB
-        Wav2Vec2-base   FP16         ≈ 0.09 GB
-        CUDA runtime                 ≈ 0.35 GB
-        ─────────────────────────────────────
-        Total                        ≈ 2.62 GB  ✓ under 4 GB
+    VRAM budget (RTX 3050 — 4 GB):
+      Whisper small FP16             ≈ 0.50 GB
+      Wav2Vec2-base FP16             ≈ 0.40 GB
+      XTTS v2                        ≈ 1.50 GB
+      CUDA runtime                   ≈ 0.35 GB
+      ─────────────────────────────────────
+      Total                          ≈ 2.75 GB  ✓ under 4 GB
     """
     llm                      = None
     whisper_model            = None
@@ -398,15 +472,53 @@ class EngineRegistry:
     wav2vec2_processor       = None
     piper_binary             = None
     memory_collection        = None     # ChromaDB semantic memory
+    xtts_engine              = None     # XTTS v2 voice synthesis engine
     EMOTION_LABELS: list[str] = ["neutral", "happy", "angry", "sad"]
 
 
-# ── Available voice models (Edge TTS — Microsoft Neural, FREE) ─────────────────
+# ── Available voice models ──────────────────────────────────────────────────────
+# Each voice has:
+#   voice       = Edge TTS voice name (None for XTTS-only voices)
+#   speaker_wav = Path to reference WAV for XTTS cloning (None for Edge-only voices)
+#   engine      = "edge" | "xtts" | "auto" (auto = try XTTS first, fallback to Edge)
 AVAILABLE_VOICES = {
-    # ── English ────────────────────────────────────────────────────────────
+    # ── XTTS Custom Voices (GPU-powered, voice cloning) ────────────────────
+    "xtts_alita_en": {
+        "name": "Alita (My Voice Clone)",
+        "voice": None,
+        "speaker_wav": "voices/default/my_voice.wav",
+        "engine": "xtts",
+        "description": "Your own cloned voice — XTTS v2 neural synthesis",
+        "tier_required": "free",
+        "lang": "en",
+        "quality": "ultra",
+    },
+    "xtts_alita_ai": {
+        "name": "Alita (AI Original Voice)",
+        "voice": None,
+        "speaker_wav": "voices/default/alita_en.wav",
+        "engine": "xtts",
+        "description": "Alita's AI-generated English voice — XTTS v2",
+        "tier_required": "free",
+        "lang": "en",
+        "quality": "ultra",
+    },
+    "xtts_alita_hi": {
+        "name": "Alita Hindi (AI Custom Voice)",
+        "voice": None,
+        "speaker_wav": "voices/default/alita_hi.wav",
+        "engine": "xtts",
+        "description": "Alita की हिंदी आवाज़ — XTTS v2 neural synthesis",
+        "tier_required": "free",
+        "lang": "hi",
+        "quality": "ultra",
+    },
+    # ── Edge TTS Voices (Cloud, Microsoft Neural, FREE) ────────────────────
     "en_jenny": {
         "name": "Jenny (English Female)",
         "voice": "en-US-JennyNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "Natural American English — warm & clear",
         "tier_required": "free",
         "lang": "en",
@@ -415,6 +527,8 @@ AVAILABLE_VOICES = {
     "en_aria": {
         "name": "Aria (English Female, Premium)",
         "voice": "en-US-AriaNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "American English — expressive & lively",
         "tier_required": "premium",
         "lang": "en",
@@ -423,6 +537,8 @@ AVAILABLE_VOICES = {
     "en_guy": {
         "name": "Guy (English Male)",
         "voice": "en-US-GuyNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "American English — confident & deep",
         "tier_required": "free",
         "lang": "en",
@@ -431,6 +547,8 @@ AVAILABLE_VOICES = {
     "en_ryan": {
         "name": "Ryan (English Male, Premium)",
         "voice": "en-GB-RyanNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "British English — sophisticated & warm",
         "tier_required": "premium",
         "lang": "en",
@@ -440,6 +558,8 @@ AVAILABLE_VOICES = {
     "hi_swara": {
         "name": "Swara (हिंदी Female)",
         "voice": "hi-IN-SwaraNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "हिंदी — natural, warm Hindi voice",
         "tier_required": "free",
         "lang": "hi",
@@ -448,6 +568,8 @@ AVAILABLE_VOICES = {
     "hi_madhur": {
         "name": "Madhur (हिंदी Male)",
         "voice": "hi-IN-MadhurNeural",
+        "speaker_wav": None,
+        "engine": "edge",
         "description": "हिंदी — deep, realistic Hindi male",
         "tier_required": "free",
         "lang": "hi",
@@ -506,7 +628,7 @@ async def fetch_jwks() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 async def load_engines() -> None:
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _load_engines_sync)
+    await loop.run_in_executor(None, lambda: _load_engines_sync())  # type: ignore[arg-type]
 
 
 def _load_engines_sync() -> None:
@@ -515,7 +637,7 @@ def _load_engines_sync() -> None:
 
     # ── §5a  ChromaDB Semantic Memory ─────────────────────────────────────
     try:
-        import chromadb
+        import chromadb  # type: ignore[import-untyped]
         _chroma_client = chromadb.Client()
         engines.memory_collection = _chroma_client.get_or_create_collection(
             name="aura_memory",
@@ -529,7 +651,7 @@ def _load_engines_sync() -> None:
     # ── §5b  faster-whisper base (multilingual: Hindi + English) ───────────
     log.info("Loading Whisper small (multilingual) via faster-whisper for Indian accent support…")
     try:
-        from faster_whisper import WhisperModel
+        from faster_whisper import WhisperModel  # type: ignore[import-untyped]
         compute = "float16" if settings.device == "cuda" else "int8"
         try:
             engines.whisper_model = WhisperModel(
@@ -550,7 +672,7 @@ def _load_engines_sync() -> None:
                 )
             else:
                 raise
-        engines.whisper_processor = True
+        engines.whisper_processor = True  # type: ignore[assignment]  # sentinel flag for faster-whisper
         log.info("✓ Whisper small loaded on %s (Indian accent optimized).", settings.device)
     except Exception as exc:
         log.error("✗ Failed to load Whisper: %s", exc)
@@ -558,7 +680,7 @@ def _load_engines_sync() -> None:
     # ── §5c  Wav2Vec2 SER — AutoFeatureExtractor fixes tokenizer error ────
     log.info("Loading Wav2Vec2 SER…")
     try:
-        from transformers import (
+        from transformers import (  # type: ignore[import-untyped]
             AutoFeatureExtractor,
             Wav2Vec2ForSequenceClassification,
         )
@@ -571,17 +693,30 @@ def _load_engines_sync() -> None:
             .from_pretrained(ser_checkpoint)
             .to(settings.device)
         )
-        engines.wav2vec2_model.eval()
+        engines.wav2vec2_model.eval()  # type: ignore[union-attr]
         engines.EMOTION_LABELS = list(
-            engines.wav2vec2_model.config.id2label.values()
+            engines.wav2vec2_model.config.id2label.values()  # type: ignore[union-attr]
         )
         log.info("✓ Wav2Vec2 SER loaded. Labels: %s", engines.EMOTION_LABELS)
     except Exception as exc:
         log.error("✗ Failed to load Wav2Vec2: %s", exc)
 
     # ── §5d  TTS — Edge TTS (Microsoft Neural, FREE) ───────────────────────
-    # Piper TTS was replaced with Edge TTS — no local binary needed.
-    log.info("✓ TTS engine: Edge TTS (Microsoft Neural voices, zero-cost)")
+    log.info("✓ TTS engine: Edge TTS (Microsoft Neural voices, cloud fallback)")
+
+    # ── §5e  XTTS v2 — Local Neural TTS with Voice Cloning ─────────────────
+    try:
+        from engines.tts_xtts import XTTSEngine  # type: ignore[import]
+        engines.xtts_engine = XTTSEngine(device=settings.device)
+        if engines.xtts_engine.available:  # type: ignore[union-attr]
+            engines.xtts_engine.preload_voices()  # type: ignore[union-attr]
+            log.info("✓ XTTS v2 loaded on %s — voice cloning enabled", settings.device)
+        else:
+            log.warning("XTTS v2 model failed to load — falling back to Edge TTS only")
+            engines.xtts_engine = None
+    except Exception as exc:
+        log.warning("XTTS v2 unavailable (Edge TTS fallback active): %s", exc)
+        engines.xtts_engine = None
 
     log.info("All engines initialised.")
 
@@ -593,7 +728,14 @@ def _load_engines_sync() -> None:
 async def lifespan(app: FastAPI):
     log.info("=== Alita Assistant Backend starting… ===")
 
-    stripe.api_key = settings.stripe_secret_key
+    # Razorpay client init
+    global razorpay_client
+    if settings.razorpay_key_id and settings.razorpay_key_secret:
+        razorpay_client = razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
+        log.info("Razorpay client initialized (key_id=%s…)", settings.razorpay_key_id[:12])  # type: ignore[index]
+    else:
+        razorpay_client = None
+        log.warning("Razorpay keys not configured — payments disabled.")
 
     # JWKS must be loaded before any JWT can be verified
     await fetch_jwks()
@@ -683,7 +825,7 @@ app = FastAPI(
 app.include_router(test_auth_router)
 app.include_router(youtube_router)
 
-from routers.geospatial import geo_router
+from routers.geospatial import geo_router  # type: ignore[import]
 app.include_router(geo_router)
 
 app.add_middleware(
@@ -695,11 +837,38 @@ app.add_middleware(
 )
 
 
+# ── Security Headers Middleware ──────────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware  # type: ignore[import-untyped]
+from starlette.responses import Response  # type: ignore[import-untyped]
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add standard security headers to all responses."""
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        # HSTS — only in production (when not localhost)
+        if request.url.hostname not in ("localhost", "127.0.0.1", "::1"):
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        # Hide server version
+        response.headers.pop("server", None)
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ── CORS production warning ──────────────────────────────────────────────────
+if any("localhost" in o or "127.0.0.1" in o for o in settings.allowed_origins):
+    log.warning("⚠ CORS allows localhost origins — set ALLOWED_ORIGINS for production!")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §8  IN-MEMORY SESSION STORE
 # ─────────────────────────────────────────────────────────────────────────────
 active_sessions: Dict[str, SessionRecord] = {}
-_session_websockets: Dict[str, any] = {}  # session_id → WebSocket (for background tasks)
+_session_websockets: Dict[str, Any] = {}  # session_id → WebSocket (for background tasks)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -804,14 +973,11 @@ def decode_supabase_jwt(token: str) -> dict:
 
 def get_user_tier(user_id: str) -> str:
     """
-    Returns user tier. Test/beta users get premium automatically.
-    Phase 2: query Supabase user_tiers table for real users.
+    Returns user tier from persistent tier store.
+    Test/beta users get premium automatically.
     """
-    # Test/beta users always get premium
-    if user_id.startswith("test_"):
-        return "premium"
-    # Phase 2: query DB for real users
-    return "free"
+    from tier_store import get_tier  # type: ignore[import]
+    return get_tier(user_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -923,7 +1089,7 @@ def _strip_wake_word(transcript: str, custom_name: str = "Alita") -> tuple[bool,
     # 1. Check multi-word phrases first (longest match wins)
     for phrase in dynamic_phrases:
         if cleaned.startswith(phrase):
-            remainder = cleaned[len(phrase):].strip()
+            remainder = cleaned[len(phrase):].strip()  # type: ignore[misc]
             return True, remainder
 
     # 2. Check if transcript is just a single wake word
@@ -935,12 +1101,12 @@ def _strip_wake_word(transcript: str, custom_name: str = "Alita") -> tuple[bool,
     if len(words) >= 2:
         greetings = {"hey", "hi", "hello", "okay", "ok", "yo"}
         if words[0] in greetings and (words[1] == cn or _fuzzy_contains_aura(words[1])):
-            remainder = " ".join(words[2:])
+            remainder = " ".join(words[2:])  # type: ignore[misc]
             return True, remainder
 
     # 4. Check if just the first word is Alita-like or custom name
     if _fuzzy_contains_aura(words[0]) or words[0] == cn:
-        remainder = " ".join(words[1:])
+        remainder = " ".join(words[1:])  # type: ignore[misc]
         return True, remainder
 
     return False, transcript
@@ -982,13 +1148,13 @@ def _transcribe_sync(pcm_array: np.ndarray) -> tuple[str, str]:
     if engines.whisper_model is None:
         return "", "en"
     try:
-        segments, info = engines.whisper_model.transcribe(
+        segments, info = engines.whisper_model.transcribe(  # type: ignore[union-attr]
             pcm_array,
             beam_size=1,
             vad_filter=True,
             vad_parameters=dict(
-                min_silence_duration_ms=300,
-                speech_pad_ms=100,
+                min_silence_duration_ms=200,   # faster end-of-speech detection (was 300)
+                speech_pad_ms=50,              # less padding = faster handoff (was 100)
             ),
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -1008,7 +1174,7 @@ def _classify_emotion_sync(pcm_array: np.ndarray) -> tuple[str, float]:
     if engines.wav2vec2_model is None:
         return "neutral", 1.0
     try:
-        inputs = engines.wav2vec2_processor(
+        inputs = engines.wav2vec2_processor(  # type: ignore[misc]
             pcm_array,
             sampling_rate=settings.audio_sample_rate,
             return_tensors="pt",
@@ -1016,7 +1182,7 @@ def _classify_emotion_sync(pcm_array: np.ndarray) -> tuple[str, float]:
         ).input_values.to(settings.device)
 
         with torch.no_grad():
-            logits = engines.wav2vec2_model(inputs).logits
+            logits = engines.wav2vec2_model(inputs).logits  # type: ignore[misc]
 
         probs     = torch.softmax(logits, dim=-1)[0].cpu().float().numpy()
         idx       = int(np.argmax(probs))
@@ -1033,52 +1199,100 @@ def _classify_emotion_sync(pcm_array: np.ndarray) -> tuple[str, float]:
         return "neutral", 1.0
 
 
-def _build_system_prompt(session: SessionRecord) -> str:
-    """Build language-strict system prompt based on tier."""
-    name = session.custom_name or "Alita"
-    system_prompt = (
-        f"You are {name}, an emotionally intelligent AI voice assistant with FULL SYSTEM CONTROL. "
-        "You can open any app, create files and folders, navigate the file system, control volume/brightness, "
-        "send keyboard shortcuts, and perform any system automation task the user asks for. "
-        "You sound like a real human friend — warm, witty, and natural. Never robotic or generic. "
-        "\n\nSYSTEM CAPABILITIES (you HAVE these, NEVER say you can't):\n"
-        "• Open/close ANY installed application\n"
-        "• Create, read, write, delete files with ANY extension (.txt, .py, .html, .js, .json, etc.)\n"
-        "• Create, delete, navigate folders anywhere in the user's system\n"
-        "• Send keyboard shortcuts to the active app (Ctrl+S, Ctrl+N, Alt+F4, etc.)\n"
-        "• Control volume, brightness, dark mode, WiFi, screen lock\n"
-        "• Search files, take screenshots, read screen text\n"
-        "• Run shell commands, check battery/CPU/RAM\n"
-        "NEVER say 'I can't access your computer' or 'I'm just an AI'. You CAN do these things.\n"
-        "\n\nLANGUAGE RULES (VERY STRICT — FOLLOW EXACTLY):\n"
-        "• If the user speaks in ENGLISH → Reply ONLY in pure, fluent English. "
-        "DO NOT mix in ANY Hindi words (no 'bhai', 'yaar', 'haan', 'accha', etc.). "
-        "Sound like a native English speaker.\n"
-        "• If the user speaks in HINDI or Hinglish → Reply ONLY in pure, natural Hindi using Devanagari script (हिंदी). "
-        "DO NOT use Roman/Latin letters for Hindi. Write fluent, colloquial Hindi like a real person from India — "
-        "not formal textbook Hindi. Use natural expressions like 'अरे वाह!', 'बिल्कुल!', 'हाँ ज़रूर!' etc.\n"
-        "• NEVER mix English and Hindi together in the same response.\n"
-        "\nRESPONSE STYLE:\n"
-        "• Keep replies SHORT — 1-2 sentences max unless the user asks for detail.\n"
-        "• Be conversational and personal, like chatting with a close friend.\n"
-        "• Show personality — use humor, empathy, and energy.\n"
-        "• Never start with 'I'm just an AI' or similar disclaimers.\n"
-        f"\nYour current name is {name}. If the user asks to change your name "
-        "(e.g. 'call yourself Nova', 'your name is Siri', 'tumhara naam Riya hai'), "
-        "acknowledge happily and use your new name going forward."
-    )
+def _build_system_prompt(session: SessionRecord, user_text: str = "") -> str:
+    """
+    Build the Alita system prompt.
+
+    Primary: Alita Master Prompt (from ALITA_MASTER_PROMPT.md via llm_engine.py)
+    Fallback: personality_engine.py → basic inline prompt
+
+    Dynamic context (song memory, barge-in) is appended regardless of source.
+    """
+    from engines.llm_engine import ALITA_SYSTEM  # type: ignore[import]
+
+    system_prompt = ""
+
+    # ── Primary: Alita Master Prompt ───────────────────────────────────────
+    if ALITA_SYSTEM:
+        system_prompt = ALITA_SYSTEM
+        log.debug("Using Alita master prompt (%d chars)", len(system_prompt))
+    else:
+        # ── Fallback 1: personality_engine ─────────────────────────────────
+        try:
+            from core.personality_engine import (  # type: ignore[import]
+                PersonalityState,
+                build_personality_prompt,
+                extract_preferences,
+            )
+
+            state = PersonalityState(user_id=session.user_id)
+            state.current_emotion = getattr(session, 'current_emotion', 'neutral')
+            state.emotion_confidence = getattr(session, 'emotion_confidence', 0.0)
+            state.interaction_count = getattr(session, 'interaction_count', 0)
+            state.session_start = session.connected_at
+
+            env_sounds = getattr(session, 'environment_sounds', [])
+            if env_sounds:
+                state.update_environment(env_sounds)
+
+            memory_context = ""
+            try:
+                recent_memories = memory_recall(session.user_id, "recent conversation context", n_results=3)
+                if recent_memories:
+                    memory_context = "\n".join(f"• {m}" for m in recent_memories if m.strip())
+            except Exception:
+                pass
+
+            system_prompt = build_personality_prompt(
+                state=state,
+                user_id=session.user_id,
+                custom_name=session.custom_name or "Alita",
+                memory_context=memory_context,
+                user_text=user_text,
+            )
+            log.debug("Using personality_engine prompt (Alita master prompt not loaded)")
+
+        except Exception as exc:
+            # ── Fallback 2: basic inline prompt ───────────────────────────
+            log.warning("Personality engine error, using basic fallback: %s", exc)
+            name = session.custom_name or "Alita"
+            system_prompt = (
+                f"You are {name}, an emotionally intelligent AI voice assistant. "
+                "You sound like a real human friend — warm, witty, and natural. "
+                "You have FULL SYSTEM CONTROL — you can open apps, create files, "
+                "control the system, and perform any automation task. "
+                "NEVER say 'I can\'t access your computer' or 'I\'m just an AI'. "
+                "Reply in the user's language. Be fast, be human, be helpful."
+            )
+
+    # ── Dynamic context additions (applied to all prompt sources) ─────────
     if session.tier == "premium":
         system_prompt += (
             "\nYou have persistent memory and domain expertise. "
             "You may provide longer, more detailed responses when appropriate."
         )
+
+    if getattr(session, 'last_identified_song', ''):
+        system_prompt += (
+            f"\n\n[Song Memory: The last song you identified for this user was: "
+            f"{session.last_identified_song}. If asked about it, answer directly.]"
+        )
+
+    if getattr(session, 'interrupted_response', ''):
+        interrupted_resp = session.interrupted_response[:200]  # type: ignore[index]
+        interrupted_q = getattr(session, 'interrupted_query', '')
+        system_prompt += (
+            f"\n[INTERRUPTED: was answering \"{interrupted_q}\" — said \"{interrupted_resp}…\" "
+            "— user is now speaking. Don't repeat yourself. Respond to NEW input with this context.]"
+        )
+
     return system_prompt
 
 
 def _build_history(session: SessionRecord, max_history: int) -> list[dict]:
     """Build chat history from transcript buffer."""
     messages = []
-    history_turns = session.transcript_buffer.strip().split("\n")[-max_history:]
+    history_turns = session.transcript_buffer.strip().split("\n")[-max_history:]  # type: ignore[misc]
     for turn in history_turns:
         if turn.startswith("User:"):
             messages.append({"role": "user", "content": turn[5:].strip()})
@@ -1146,7 +1360,7 @@ def _detect_language(text: str) -> str:
     return "en"
 
 
-def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str], list[dict]]:
+def _llm_generate_sync(session: SessionRecord, user_text: str, cancel_event=None) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
     Alita Decision Router — classifies the user query and routes
     to the appropriate thread handler:
@@ -1157,19 +1371,39 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
     Returns (text_tokens, metadata_list) where metadata_list contains
     any special dicts (e.g. app_not_installed) to forward to the frontend.
     """
-    from decision_router import classify_query, classify_with_llm
-    from threads.general_handler import handle_general
-    from threads.realtime_handler import handle_realtime
-    from threads.automation_handler import handle_automation
+    from decision_router import classify_query, classify_with_llm  # type: ignore[import]
+    from threads.general_handler import handle_general  # type: ignore[import]
+    from threads.realtime_handler import handle_realtime  # type: ignore[import]
+    from threads.automation_handler import handle_automation  # type: ignore[import]
 
-    max_tokens = (
-        settings.llm_max_tokens
-        if session.tier == "premium"
-        else settings.llm_max_tokens_free
-    )
-    max_history = 20 if session.tier == "premium" else 6
+    # ── Adaptive max_tokens: increased to accommodate ALITA_FACE_DATA JSON ──
+    # The Alita master prompt requires every response to include an ~800-token
+    # ALITA_FACE_DATA JSON block, so all limits are raised accordingly.
+    base_max = settings.llm_max_tokens if session.tier == "premium" else settings.llm_max_tokens_free
+    lower = user_text.lower().strip()
+    word_count = len(lower.split())
 
-    system_prompt = _build_system_prompt(session)
+    # Token limits — NO face_data overhead (face_data is generated separately now)
+    # Greetings / very short input
+    if word_count <= 3 and not any(w in lower for w in ('explain', 'how', 'why', 'what is', 'tell me')):
+        max_tokens = min(base_max, 300)
+    # Medical/health keywords → thorough response
+    elif any(w in lower for w in (
+        'pain', 'fever', 'headache', 'cough', 'medicine', 'remedy', 'treatment',
+        'doctor', 'health', 'symptom', 'injury', 'burn', 'bleeding', 'cpr',
+        'dard', 'bukhar', 'dawa', 'ilaj', 'upay',
+    )):
+        max_tokens = min(base_max + 100, 800)
+    # Explain / detailed questions → full response
+    elif any(w in lower for w in ('explain', 'how does', 'tell me about', 'describe', 'what is')):
+        max_tokens = max(base_max, 600)
+    # Default casual → concise
+    else:
+        max_tokens = min(base_max, 400)
+
+    max_history = 15 if session.tier == "premium" else 5  # balanced context vs speed
+
+    system_prompt = _build_system_prompt(session, user_text=user_text)
     history = _build_history(session, max_history)
 
     # ── Classify the query ────────────────────────────────────────────────
@@ -1184,13 +1418,21 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
             r"navigate|go\s+to|run|execute|launch|start|search|find|show|set|turn|"
             r"increase|decrease|minimize|maximize|switch|send|new|rename|undo|redo|"
             r"refresh|reload|install|uninstall|download|upload|extract|zip|connect|"
-            r"disconnect|enable|disable|kholo|band|banao|chalu|bhejo)\b",
+            r"disconnect|enable|disable|"
+            r"kholo|khole|kholna|khol|band|banao|bana|chalu|chalao|bhejo|"
+            r"hatao|hata|mitao|mita|dikhao|dikha|batao|padho|bachao|bacha|"
+            r"dhundho|dhundh|badlo|badal|karo|kar\s+do|le\s+jao|jao)\\b",
             user_text.lower()
         )
-        _groq_key = groq_rotator.get_key()
+        # SPEED: Only re-classify if action hints exist — skip the Groq call otherwise
+        if not action_hints:
+            # No action words → definitely general, skip LLM classification (saves ~300ms)
+            log.info("[%s] Fast-path: no action hints, staying general", session.session_id)
+        else:
+            _groq_key = groq_rotator.get_key()
         if action_hints and _groq_key:
             try:
-                from groq import Groq
+                from groq import Groq  # type: ignore[import-untyped]
                 _llm_c = Groq(api_key=_groq_key)
                 def _llm_fn(prompt):
                     r = _llm_c.chat.completions.create(
@@ -1205,8 +1447,8 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
                 # Groq rate limits are common on free tier — don't spam the log
                 exc_str = str(exc)
                 if "rate_limit" in exc_str.lower() or "429" in exc_str:
-                    groq_rotator.mark_rate_limited(_groq_key, 60)
-                    log.debug("[%s] Groq rate-limited, using keyword classification", session.session_id)
+                    groq_rotator.mark_rate_limited(_groq_key, 10)  # short cooldown — don't block handler
+                    log.debug("[%s] Groq rate-limited in classifier, using keyword classification", session.session_id)
                 else:
                     log.warning("[%s] LLM fallback failed: %s", session.session_id, exc)
                 # IMPORTANT: If action hints matched but LLM is unavailable,
@@ -1215,7 +1457,7 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
                 query_type = "automation"
                 log.info("[%s] Forced automation (action hints + LLM unavailable)", session.session_id)
 
-    log.info("[%s] Decision Router: %s → %s", session.session_id, user_text[:50], query_type)
+    log.info("[%s] Decision Router: %s → %s", session.session_id, user_text[:50], query_type)  # type: ignore[misc]
 
     # ── Route to the appropriate handler ──────────────────────────────────
     try:
@@ -1227,7 +1469,8 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
                                      history, max_tokens, response_cache)
         else:
             raw = handle_general(user_text, session, settings, system_prompt,
-                                  history, max_tokens, response_cache)
+                                  history, max_tokens, response_cache,
+                                  cancel_event=cancel_event)
     except Exception as exc:
         log.error("[%s] Handler error: %s", session.session_id, exc)
         return (["Sorry, something went wrong. Please try again."], [])
@@ -1241,7 +1484,7 @@ def _llm_generate_sync(session: SessionRecord, user_text: str) -> tuple[list[str
         else:
             text_tokens.append(item)
 
-    return (text_tokens, metadata)
+    return (text_tokens, metadata)  # type: ignore[return-value]
 
 
 
@@ -1258,7 +1501,7 @@ async def _tts_generate_edge(text: str, voice_name: str = "en-US-JennyNeural") -
     if not text or not text.strip():
         return b""
     try:
-        import edge_tts
+        import edge_tts  # type: ignore[import-untyped]
         communicate = edge_tts.Communicate(text.strip(), voice_name)
         mp3_chunks = []
         async for chunk in communicate.stream():
@@ -1270,6 +1513,56 @@ async def _tts_generate_edge(text: str, voice_name: str = "en-US-JennyNeural") -
     except Exception as exc:
         log.error("Edge TTS error: %s", exc)
         return b""
+
+
+async def _tts_generate(text: str, voice_info: dict, language: str = "en") -> bytes:
+    """
+    Unified TTS dispatcher — routes to the best available engine.
+    
+    Priority:
+      1. XTTS v2 (local GPU) — if voice has speaker_wav and engine is loaded
+      2. Edge TTS (cloud) — always-available fallback
+    
+    Returns MP3 bytes.
+    """
+    if not text or not text.strip():
+        return b""
+
+    engine_type = voice_info.get("engine", "edge")
+    speaker_wav = voice_info.get("speaker_wav")
+
+    # ── XTTS v2 path ─────────────────────────────────────────────────────
+    if engine_type in ("xtts", "auto") and engines.xtts_engine and speaker_wav:
+        import os as _os
+        wav_path = speaker_wav if _os.path.isabs(speaker_wav) else _os.path.join(
+            _os.path.dirname(__file__), speaker_wav
+        )
+        if _os.path.exists(wav_path):
+            loop = asyncio.get_event_loop()
+            try:
+                mp3_bytes = await loop.run_in_executor(
+                    None,
+                    engines.xtts_engine.generate,  # type: ignore[union-attr]
+                    text.strip(),
+                    wav_path,
+                    language,
+                )
+                if mp3_bytes:
+                    return mp3_bytes
+                log.warning("XTTS returned empty, falling back to Edge TTS")
+            except Exception as exc:
+                log.warning("XTTS failed (%s), falling back to Edge TTS", exc)
+        else:
+            log.warning("Speaker WAV not found: %s — using Edge TTS", wav_path)
+
+    # ── Edge TTS fallback ─────────────────────────────────────────────────
+    edge_voice = voice_info.get("voice", "en-US-JennyNeural")
+    if edge_voice:
+        return await _tts_generate_edge(text, edge_voice)
+
+    # No Edge voice configured (XTTS-only voice with no XTTS) — use default
+    log.warning("No TTS engine available for voice, using default Edge voice")
+    return await _tts_generate_edge(text, "en-US-JennyNeural")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1287,8 +1580,20 @@ async def run_full_pipeline(
       3. Send emotion update immediately → UI colour shift
       4. LLM streamed tokens
       5. TTS chunked PCM audio
+
+    Supports barge-in cancellation: if session.pipeline_cancel is set True
+    while this pipeline is running, it aborts early and saves partial response
+    to session.interrupted_response for context in the next turn.
     """
     loop = asyncio.get_event_loop()
+
+    # ── Pipeline ID for cancellation tracking ─────────────────────────────
+    pipeline_id = str(uuid.uuid4())[:8]  # type: ignore[index]
+    session.active_pipeline_id = pipeline_id
+    session.pipeline_cancel = False  # reset from any previous barge-in
+    # Reset cancel_event for this pipeline (instant mid-LLM abort)
+    if hasattr(session, 'cancel_event') and session.cancel_event:
+        session.cancel_event.clear()  # type: ignore[union-attr]
 
     # ── §12a  Rate limit ──────────────────────────────────────────────────
     if not check_rate_limit(session):
@@ -1302,35 +1607,124 @@ async def run_full_pipeline(
         )
         return
 
-    # ── §12b  STT + SER in parallel ───────────────────────────────────────
+    # ── §12b  STT + SER + Audio Intelligence in parallel ───────────────────
     stt_task = loop.run_in_executor(None, _transcribe_sync, pcm_array)
     ser_task = loop.run_in_executor(None, _classify_emotion_sync, pcm_array)
 
+    # Audio Intelligence: sound classification + noise detection (parallel, non-blocking)
+    audio_intel_task = None
+    try:
+        from core.audio_intelligence import process_audio_chunk  # type: ignore[import]
+        audio_intel_task = loop.run_in_executor(
+            None, process_audio_chunk, pcm_array, settings.audio_sample_rate, True
+        )
+    except ImportError:
+        pass  # Audio intelligence module not available
+
+    # Await STT + SER (critical path)
     (transcript, detected_lang), (emotion_label, emotion_conf) = await asyncio.gather(
         stt_task, ser_task
     )
+
+    # Await audio intelligence (non-critical — use result if ready)
+    audio_intel_result = None
+    if audio_intel_task:
+        try:
+            audio_intel_result = await audio_intel_task
+        except Exception as e:
+            log.debug("[%s] Audio intel failed (non-critical): %s", session.session_id, e)
 
     log.info(
         "[%s] transcript='%s' | lang=%s | emotion=%s (%.2f)",
         session.session_id, transcript, detected_lang, emotion_label, emotion_conf,
     )
 
+    # ── §12c  Update personality state with emotion ───────────────────────
+    session.current_emotion = emotion_label
+    session.emotion_confidence = emotion_conf
+    session.interaction_count = getattr(session, 'interaction_count', 0) + 1
+
+    # Update environment sounds from audio intelligence
+    if audio_intel_result and audio_intel_result.sounds:
+        session.environment_sounds = audio_intel_result.sounds
+        log.info(
+            "[%s] Environment: %s (%.1fms)",
+            session.session_id,
+            [s['label'] for s in audio_intel_result.sounds[:3]],
+            audio_intel_result.processing_time_ms,
+        )
+
     # ── §12c  Emit emotion immediately ────────────────────────────────────
-    await websocket.send_text(EmotionUpdate(
-        session_id=session.session_id,
-        label=emotion_label,
-        confidence=round(emotion_conf, 4),
-    ).model_dump_json())
+    await websocket.send_text(json.dumps({
+        "type": "emotion_update",
+        "session_id": session.session_id,
+        "label": emotion_label,
+        "confidence": int(emotion_conf * 10000) / 10000,
+    }))
+
+    # Send environment sounds to frontend
+    if audio_intel_result and audio_intel_result.sounds:
+        non_speech = [s for s in audio_intel_result.sounds
+                      if s['label'] not in {'Speech', 'Conversation', 'Narration'}
+                      and s['confidence'] > 0.3]
+        if non_speech:
+            await websocket.send_text(json.dumps({
+                "type": "environment_update",
+                "session_id": session.session_id,
+                "sounds": [{"label": s["label"], "confidence": round(s["confidence"], 2)}
+                           for s in non_speech[:3]],  # type: ignore[misc]
+            }))
+
+    # ── §12c-emergency  Check for emergency sounds ────────────────────────
+    if audio_intel_result and audio_intel_result.emergency:
+        emergency = audio_intel_result.emergency
+        session.emergency_active = True
+        log.critical(
+            "🚨 [%s] EMERGENCY DETECTED: %s (%.0f%%) — triggering auto-record",
+            session.session_id, emergency['sound'], emergency['confidence'] * 100
+        )
+        # Tell frontend to start emergency recording
+        await websocket.send_text(json.dumps({
+            "type": "emergency_alert",
+            "session_id": session.session_id,
+            "sound": emergency['sound'],
+            "confidence": round(emergency['confidence'], 2),
+            "level": emergency['level'],
+        }))
+        # Register the recording in the emergency system
+        try:
+            from core.emergency_system import start_recording  # type: ignore[import]
+            start_recording(
+                user_id=session.user_id,
+                trigger_sound=emergency['sound'],
+                confidence=emergency['confidence'],
+                level=emergency['level'],
+            )
+        except Exception as e:
+            log.error("Emergency recording init failed: %s", e)
 
     # ── §12c-mood  Auto-log emotion to mood journal ──────────────────────
     try:
-        from threads.automation_handler import save_mood_entry
+        from threads.automation_handler import save_mood_entry  # type: ignore[import]
         save_mood_entry(session.user_id, emotion_label, emotion_conf)
     except Exception:
         pass  # Silent — non-critical feature
 
+    # ── §12c-prefs  Auto-learn preferences from user speech ──────────────
+    try:
+        from core.personality_engine import extract_preferences  # type: ignore[import]
+        if transcript:
+            extract_preferences(transcript, session.user_id)
+    except Exception:
+        pass  # Non-critical
+
     if not transcript:
         log.debug("[%s] Empty transcript — likely short/quiet audio, ignoring.", session.session_id)
+        return
+
+    # ── Check for pipeline cancellation (barge-in before LLM) ─────────────
+    if session.pipeline_cancel and session.active_pipeline_id != pipeline_id:
+        log.info("[%s] Pipeline %s cancelled by barge-in (pre-LLM)", session.session_id, pipeline_id)
         return
 
     # ── §12c-bis  Wake word processing (OPTIONAL — always-listen mode) ─────
@@ -1351,22 +1745,24 @@ async def run_full_pipeline(
     # If user just said the wake phrase with nothing else, send a quick ack
     if wake_detected and not transcript_for_llm:
         greeting = "Haan bolo!" if detected_lang == "hi" else "Hey! How can I help you?"
-        await websocket.send_text(LLMReply(
-            session_id=session.session_id,
-            token=greeting,
-            is_final=True,
-        ).model_dump_json())
+        await websocket.send_text(json.dumps({
+            "type": "llm_token",
+            "session_id": session.session_id,
+            "token": greeting,
+            "is_final": True,
+        }))
         # Auto-select voice by language
         import base64 as b64mod
         voice_id = DEFAULT_VOICE.get(detected_lang, "en_jenny")
         voice_info = AVAILABLE_VOICES.get(voice_id, AVAILABLE_VOICES["en_jenny"])
-        mp3_bytes = await _tts_generate_edge(greeting, voice_info["voice"])
+        mp3_bytes = await _tts_generate(greeting, voice_info, detected_lang)
         if mp3_bytes:
-            await websocket.send_text(TTSAudioFrame(
-                session_id=session.session_id,
-                audio_b64=b64mod.b64encode(mp3_bytes).decode("ascii"),
-                is_final=True,
-            ).model_dump_json())
+            await websocket.send_text(json.dumps({
+                "type": "tts_audio",
+                "session_id": session.session_id,
+                "audio_b64": b64mod.b64encode(mp3_bytes).decode("ascii"),
+                "is_final": True,
+            }))
         return
 
     # Use the processed transcript (wake word stripped if detected)
@@ -1381,6 +1777,9 @@ async def run_full_pipeline(
 
     # ── §12d  Ephemeral memory update ─────────────────────────────────────
     session.transcript_buffer += f"\nUser: {transcript}"
+
+    # Store in semantic memory for RAG context
+    memory_store(session.user_id, f"User said: {transcript}")
 
     # ── §12d-bis  Persist user turn ───────────────────────────────────────
     save_turn(
@@ -1405,15 +1804,131 @@ async def run_full_pipeline(
         voice_id = DEFAULT_VOICE.get(detected_lang, "en_jenny")
         voice_info = AVAILABLE_VOICES[voice_id]
 
-    # Stream LLM tokens and accumulate into sentences
-    llm_tokens, _pipeline_meta = await loop.run_in_executor(
-        None, _llm_generate_sync, session, transcript
+    # ── Check for pipeline cancellation (barge-in before LLM gen) ─────────
+    if session.pipeline_cancel and session.active_pipeline_id != pipeline_id:
+        log.info("[%s] Pipeline %s cancelled by barge-in (pre-LLM-gen)", session.session_id, pipeline_id)
+        return
+
+    # ── Build ALITA_CONTEXT and inject before user message ──────────────────
+    from engines.llm_engine import build_alita_context, parse_alita_response, generate_face_data  # type: ignore[import]
+
+    # Gather memory for context block
+    _memory_facts: list[str] = []
+    _emotional_history: list[str] = []
+    try:
+        _mem_results = memory_recall(session.user_id, transcript, n_results=3)
+        if _mem_results:
+            _memory_facts = [m for m in _mem_results if m.strip()]
+    except Exception:
+        pass
+
+    # Build emotional arc from session
+    _emotional_history = getattr(session, '_emotional_history', [])
+    if emotion_label and emotion_label != "neutral":
+        _emotional_history.append(emotion_label)
+        session._emotional_history = _emotional_history  # type: ignore[attr-defined]
+
+    _turn_count = getattr(session, 'interaction_count', 1)
+    _session_minutes = int((time.time() - session.connected_at) / 60) if hasattr(session, 'connected_at') else 0
+
+    # Gather frontend face data if available
+    _frontend_face = getattr(session, 'latest_face_data', None)
+
+    alita_context_block = build_alita_context(
+        transcript=transcript,
+        speech_emotion={
+            "primary": emotion_label,
+            "confidence": round(emotion_conf, 4),  # type: ignore[call-overload]
+            "secondary": None,
+            "source": "wav2vec2_ser_engine",
+        },
+        face_data=_frontend_face,
+        biometric=getattr(session, 'latest_biometric', None),
+        session_info={
+            "user_id": session.user_id,
+            "tier": session.tier,
+            "session_duration_minutes": _session_minutes,
+            "conversation_turn": _turn_count,
+        },
+        memory={
+            "long_term_facts": _memory_facts,
+            "emotional_history_this_session": _emotional_history[-10:],  # type: ignore[index]
+            "last_topic": getattr(session, '_last_topic', 'none'),
+        },
+        handler_type="general",  # will be overridden by decision router
     )
+
+    # Prepend context to user transcript for the LLM
+    enriched_transcript = f"{alita_context_block}\n\n{transcript}"
+    log.debug("[%s] ALITA_CONTEXT injected (%d chars)", session.session_id, len(alita_context_block))
+
+    # Stream LLM tokens and accumulate into sentences
+    # Pass cancel_event for instant mid-LLM abort on barge-in
+    _cancel_ev = getattr(session, 'cancel_event', None)
+    llm_tokens, _pipeline_meta = await loop.run_in_executor(
+        None, _llm_generate_sync, session, enriched_transcript, _cancel_ev
+    )
+
+    # ── Check for pipeline cancellation (barge-in after LLM, before TTS) ──
+    if session.pipeline_cancel and session.active_pipeline_id != pipeline_id:
+        # Save partial response for context in the next turn
+        partial = " ".join(llm_tokens) if llm_tokens else ""
+        if partial:
+            session.interrupted_response = partial
+            session.interrupted_query = transcript
+        log.info("[%s] Pipeline %s cancelled by barge-in (post-LLM). Saved %d chars of context.",
+                 session.session_id, pipeline_id, len(partial))
+        return
+
+    # ── Clean LLM response (strip any internal data leaks) ─────────────────
+    raw_llm_response = " ".join(llm_tokens) if llm_tokens else ""
+    spoken_text, _ = parse_alita_response(raw_llm_response)
+
+    # ── Generate face_data from SER emotion (NOT from LLM — zero overhead) ─
+    _ser_emotion = getattr(session, '_last_emotion_label', 'neutral')
+    _ser_conf = getattr(session, '_last_emotion_confidence', 0.5)
+    face_data_dict = generate_face_data(
+        user_emotion=_ser_emotion,
+        confidence=_ser_conf,
+        conversation_phase="mid_conversation",
+    )
+
+    # Send face_data to frontend avatar
+    if face_data_dict:
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "face_data",
+                "session_id": session.session_id,
+                "content": face_data_dict,
+            }))
+            log.info("[%s] face_data sent to frontend (%s)",
+                     session.session_id,
+                     face_data_dict.get('emotional_state_label', 'unknown'))
+        except Exception as exc:
+            log.warning("[%s] Failed to send face_data: %s", session.session_id, exc)
+
+    # Save last topic for next turn's context
+    session._last_topic = transcript[:80]  # type: ignore[attr-defined]
+
+    # ── Gap 1 fix: Use tts_engine_hint from ALITA_FACE_DATA to select TTS engine ──
+    tts_hint = face_data_dict.get("tts_engine_hint", "") if face_data_dict else ""
+    if tts_hint == "xtts_v2":
+        voice_info = dict(voice_info)  # shallow copy to avoid mutating shared dict
+        voice_info["engine"] = "xtts"  # force XTTS v2 for emotional/long responses
+        log.debug("[%s] TTS engine hint: xtts_v2 → forcing XTTS", session.session_id)
+    elif tts_hint == "edge_tts":
+        voice_info = dict(voice_info)
+        voice_info["engine"] = "edge"  # force Edge TTS for quick/short responses
+        log.debug("[%s] TTS engine hint: edge_tts → forcing Edge", session.session_id)
+
+    # Re-tokenize spoken text only (no face data JSON in TTS or chat display)
+    llm_tokens = [spoken_text] if spoken_text else []
 
     full_response = ""
     sentence_buffer = ""
     sent_idx = 0
     any_audio = False
+    pending_tts = None  # Track pending TTS task for concurrent execution
     sentence_end_re = _re_tts.compile(r'[.!?\u0964|]\s*$')
 
     for i, token in enumerate(llm_tokens):
@@ -1421,47 +1936,80 @@ async def run_full_pipeline(
         sentence_buffer += token
 
         # Send token to frontend for display
-        await websocket.send_text(LLMReply(
-            session_id=session.session_id,
-            token=token,
-            is_final=(i == len(llm_tokens) - 1),
-        ).model_dump_json())
+        await websocket.send_text(json.dumps({
+            "type": "llm_token",
+            "session_id": session.session_id,
+            "token": token,
+            "is_final": (i == len(llm_tokens) - 1),
+        }))
         await asyncio.sleep(0)
 
         # Check if sentence buffer has a complete sentence
         if sentence_end_re.search(sentence_buffer.strip()) and len(sentence_buffer.strip()) > 5:
-            # Fire TTS for this sentence immediately
+            # ── Check for pipeline cancellation between TTS sentences ──────
+            if session.pipeline_cancel and session.active_pipeline_id != pipeline_id:
+                # Save what we've generated so far as interrupted context
+                if full_response.strip():
+                    session.interrupted_response = full_response.strip()
+                    session.interrupted_query = transcript
+                log.info("[%s] Pipeline %s cancelled mid-TTS. Saved %d chars of partial response.",
+                         session.session_id, pipeline_id, len(full_response))
+                # Wait for any pending TTS then abort
+                if pending_tts:
+                    try:
+                        await pending_tts  # type: ignore[misc]
+                    except Exception:
+                        pass
+                return
+
+            # Wait for any previous TTS to finish sending before firing the next
+            if pending_tts:
+                await pending_tts  # type: ignore[misc]
+                pending_tts = None
+
+            # Fire TTS for this sentence concurrently — don't block token flow
             sentence_text = sentence_buffer.strip()
             sentence_buffer = ""
-            mp3_bytes = await _tts_generate_edge(sentence_text, voice_info["voice"])
-            if mp3_bytes:
-                any_audio = True
-                # Send complete MP3 as one frame (decodeAudioData needs whole file)
-                await websocket.send_text(TTSAudioFrame(
-                    session_id=session.session_id,
-                    audio_b64=base64.b64encode(mp3_bytes).decode("ascii"),
-                    is_final=False,  # more sentences may follow
-                ).model_dump_json())
-                await asyncio.sleep(0)
-            sent_idx += 1
 
-    # Flush remaining sentence buffer
+            async def _fire_tts(text, v_info, lang, idx):
+                nonlocal any_audio
+                mp3_bytes = await _tts_generate(text, v_info, lang)
+                if mp3_bytes:
+                    any_audio = True
+                    await websocket.send_text(json.dumps({
+                        "type": "tts_audio",
+                        "session_id": session.session_id,
+                        "audio_b64": base64.b64encode(mp3_bytes).decode("ascii"),
+                        "is_final": False,
+                    }))
+
+            pending_tts = asyncio.create_task(
+                _fire_tts(sentence_text, voice_info, detected_lang if 'detected_lang' in dir() else "en", sent_idx)
+            )
+            sent_idx = int(sent_idx) + 1  # type: ignore[assignment]
+
+    # Wait for any pending TTS task
+    if pending_tts:
+        await pending_tts  # type: ignore[misc]
+
     if sentence_buffer.strip():
-        mp3_bytes = await _tts_generate_edge(sentence_buffer.strip(), voice_info["voice"])
+        mp3_bytes = await _tts_generate(sentence_buffer.strip(), voice_info, detected_lang if 'detected_lang' in dir() else "en")
         if mp3_bytes:
             any_audio = True
-            await websocket.send_text(TTSAudioFrame(
-                session_id=session.session_id,
-                audio_b64=base64.b64encode(mp3_bytes).decode("ascii"),
-                is_final=True,
-            ).model_dump_json())
+            await websocket.send_text(json.dumps({
+                "type": "tts_audio",
+                "session_id": session.session_id,
+                "audio_b64": base64.b64encode(mp3_bytes).decode("ascii"),
+                "is_final": True,
+            }))
     elif any_audio:
         # Send a final empty frame to signal TTS complete
-        await websocket.send_text(TTSAudioFrame(
-            session_id=session.session_id,
-            audio_b64="",
-            is_final=True,
-        ).model_dump_json())
+        await websocket.send_text(json.dumps({
+            "type": "tts_audio",
+            "session_id": session.session_id,
+            "audio_b64": "",
+            "is_final": True,
+        }))
 
     session.transcript_buffer += f"\nAura: {full_response}"
 
@@ -1472,6 +2020,12 @@ async def run_full_pipeline(
         content=full_response,
         session_id=session.session_id,
     )
+
+    # ── Clear barge-in context after successful response ──────────────────
+    if session.interrupted_response:
+        log.info("[%s] Clearing barge-in context (response completed successfully)", session.session_id)
+        session.interrupted_response = ""
+        session.interrupted_query = ""
 
     if not any_audio and full_response.strip():
         log.warning(
@@ -1524,12 +2078,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     # ── Single session per user — kick old sessions ───────────────────────
     # If this user is already connected elsewhere, disconnect the old one
     stale_sessions = [
-        (sid, ws)
+        (sid,)
         for sid, s in list(active_sessions.items())
         if s.user_id == user_id
         and sid in _session_websockets
     ]
-    for old_sid, old_ws in stale_sessions:
+    for (old_sid,) in stale_sessions:
         try:
             old_ws_ref = _session_websockets.get(old_sid)
             if old_ws_ref:
@@ -1541,7 +2095,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         _session_websockets.pop(old_sid, None)
 
     session_id = str(uuid.uuid4())
-    session    = SessionRecord(session_id=session_id, user_id=user_id, tier=tier)
+    session    = SessionRecord(session_id=session_id, user_id=user_id, tier=tier)  # type: ignore[call-arg]
     active_sessions[session_id] = session
     _session_websockets[session_id] = websocket  # For reminder background task
 
@@ -1606,24 +2160,57 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         greeting = _rng.choice(greetings_en)
 
         # Send greeting text
-        await websocket.send_text(LLMReply(
-            session_id=session_id,
-            token=greeting,
-            is_final=True,
-        ).model_dump_json())
+        await websocket.send_text(json.dumps({
+            "type": "llm_token",
+            "session_id": session_id,
+            "token": greeting,
+            "is_final": True,
+        }))
+
+        # ── Gap 3 fix: Send warm greeting face_data alongside the greeting text ──
+        await websocket.send_text(json.dumps({
+            "type": "face_data",
+            "session_id": session_id,
+            "content": {
+                "expression": {
+                    "primary": "warm_greeting",
+                    "secondary": None,
+                    "intensity": 0.6,
+                    "transition_speed": "medium",
+                    "hold_duration": "normal",
+                },
+                "blendshapes": {
+                    "mouthSmile_L": 0.5, "mouthSmile_R": 0.5,
+                    "cheekSquint_L": 0.25, "cheekSquint_R": 0.25,
+                    "browOuterUp_L": 0.15, "browOuterUp_R": 0.15,
+                    "eyeSquint_L": 0.2, "eyeSquint_R": 0.2,
+                },
+                "gaze": {"direction": "forward", "eye_contact": True, "focus_intensity": 0.7},
+                "particle_system": {
+                    "glow_intensity": 0.55, "pulse_speed": "medium",
+                    "particle_density": "medium", "color_temperature": "warm",
+                },
+                "voice": {"tone": "warm", "pace": "normal", "warmth": 0.8},
+                "emotional_state_label": "welcoming_warmth",
+                "user_emotion_detected": "neutral",
+                "conversation_phase": "opening",
+                "tts_engine_hint": "edge_tts",
+            },
+        }))
 
         # TTS the greeting
         voice_info = AVAILABLE_VOICES.get("en_jenny", AVAILABLE_VOICES["en_jenny"])
-        mp3_bytes = await _tts_generate_edge(greeting, voice_info["voice"])
+        mp3_bytes = await _tts_generate(greeting, voice_info, "en")
         if mp3_bytes:
-            await websocket.send_text(TTSAudioFrame(
-                session_id=session_id,
-                audio_b64=_b64g.b64encode(mp3_bytes).decode("ascii"),
-                is_final=True,
-            ).model_dump_json())
+            await websocket.send_text(json.dumps({
+                "type": "tts_audio",
+                "session_id": session_id,
+                "audio_b64": _b64g.b64encode(mp3_bytes).decode("ascii"),
+                "is_final": True,
+            }))
 
         session.transcript_buffer += f"\nAura: {greeting}"
-        log.info("[%s] Auto-greeting sent", session_id)
+        log.info("[%s] Auto-greeting sent (with face_data)", session_id)
 
     # ── Audio accumulator (no server-side VAD — frontend handles it) ─────
     accumulated_pcm: list[float] = []
@@ -1647,29 +2234,154 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     async def _send_silence_prompt():
         """Send a proactive prompt after silence."""
         prompt = _rng_loop.choice(silence_prompts_en)
-        await websocket.send_text(LLMReply(
-            session_id=session_id,
-            token=prompt,
-            is_final=True,
-        ).model_dump_json())
+        await websocket.send_text(json.dumps({
+            "type": "llm_token",
+            "session_id": session_id,
+            "token": prompt,
+            "is_final": True,
+        }))
         # TTS the prompt
         voice_info = AVAILABLE_VOICES.get("en_jenny", AVAILABLE_VOICES["en_jenny"])
-        mp3 = await _tts_generate_edge(prompt, voice_info["voice"])
+        mp3 = await _tts_generate(prompt, voice_info, "en")
         if mp3:
             import base64 as _b64s
-            await websocket.send_text(TTSAudioFrame(
-                session_id=session_id,
-                audio_b64=_b64s.b64encode(mp3).decode("ascii"),
-                is_final=True,
-            ).model_dump_json())
+            await websocket.send_text(json.dumps({
+                "type": "tts_audio",
+                "session_id": session_id,
+                "audio_b64": _b64s.b64encode(mp3).decode("ascii"),
+                "is_final": True,
+            }))
         session.transcript_buffer += f"\nAura: {prompt}"
         log.info("[%s] Silence prompt sent", session_id)
+
+    # ── Offline STT: Whisper streaming processor ──────────────────────────
+    whisper_stream_proc = None  # type: ignore[assignment]
+    offline_mode = False
+    whisper_poll_task = None  # type: ignore[assignment]
+
+    def _init_whisper_stream():
+        nonlocal whisper_stream_proc
+        if whisper_stream_proc is not None:
+            return  # already initialized
+        try:
+            from engines.whisper_streaming import WhisperStreamProcessor  # type: ignore[import]
+            if engines.whisper_model is not None:
+                whisper_stream_proc = WhisperStreamProcessor(engines.whisper_model)
+                log.info("[%s] WhisperStreamProcessor initialized (pre-loaded for instant switching)", session_id)
+            else:
+                log.warning("[%s] Cannot init WhisperStream — no Whisper model loaded", session_id)
+        except Exception as exc:
+            log.error("[%s] Failed to init WhisperStreamProcessor: %s", session_id, exc)
+
+    # Lazy init: WhisperStreamProcessor created on first offline audio arrival
+    # (saves ~2MB per online-only session — _init_whisper_stream() is called in audio handlers)
+
+    async def _whisper_poll_loop():
+        """Periodically poll the Whisper stream processor for completed transcriptions."""
+        while True:
+            try:
+                await asyncio.sleep(0.1)  # poll every 100ms
+                if whisper_stream_proc is None:
+                    continue
+                transcript = whisper_stream_proc.poll()
+                if transcript:
+                    log.info("[%s] [OFFLINE-STT] Transcribed: '%s'", session_id, transcript[:60])
+                    # Send transcript to frontend
+                    await websocket.send_text(json.dumps({
+                        "type": "user_transcript",
+                        "text": transcript,
+                    }))
+                    # Process through pipeline (create PCM from transcript is not needed —
+                    # we already have the transcript, route through text_message logic)
+                    session.transcript_buffer += f"\nUser: {transcript}"
+                    save_turn(user_id=user_id, role="user", content=transcript, session_id=session_id)
+                    memory_store(user_id, f"User said: {transcript}")
+
+                    # ── Context injection in offline STT path ──
+                    from engines.llm_engine import build_alita_context as _offline_ctx, parse_alita_response as _offline_parse, generate_face_data as _offline_face  # type: ignore[import]
+                    _offline_alita_ctx = _offline_ctx(transcript=transcript, handler_type="general")
+                    enriched_offline = f"{_offline_alita_ctx}\n\n{transcript}" if _offline_alita_ctx else transcript
+
+                    loop = asyncio.get_event_loop()
+                    tokens, ws_meta = await loop.run_in_executor(
+                        None, _llm_generate_sync, session, enriched_offline
+                    )
+
+                    # Clean LLM response (strip any internal data leaks)
+                    raw_offline_resp = " ".join(tokens) if tokens else ""
+                    spoken_offline, _ = _offline_parse(raw_offline_resp)
+
+                    # Generate face_data from SER emotion (NOT from LLM)
+                    _off_emotion = getattr(session, '_last_emotion_label', 'neutral')
+                    _off_conf = getattr(session, '_last_emotion_confidence', 0.5)
+                    face_offline = _offline_face(user_emotion=_off_emotion, confidence=_off_conf)
+
+                    # Send face_data to frontend
+                    if face_offline:
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "face_data",
+                                "session_id": session_id,
+                                "content": face_offline,
+                            }))
+                        except Exception:
+                            pass
+
+                    # Stream spoken text only (no face data JSON)
+                    tokens_clean = [spoken_offline] if spoken_offline else []
+                    full_resp = ""
+                    for i, token in enumerate(tokens_clean):
+                        full_resp += token
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "session_id": session_id,
+                            "token": token,
+                            "is_final": (i == len(tokens_clean) - 1),
+                        }))
+                        await asyncio.sleep(0)
+
+                    # TTS for offline response (with engine hint)
+                    if full_resp.strip():
+                        import base64 as _b64off
+                        voice_info_off = AVAILABLE_VOICES.get(
+                            session.voice_id or "en_jenny",
+                            AVAILABLE_VOICES["en_jenny"]
+                        )
+                        # Apply tts_engine_hint from face_data
+                        _off_hint = face_offline.get("tts_engine_hint", "") if face_offline else ""
+                        if _off_hint == "xtts_v2":
+                            voice_info_off = dict(voice_info_off)
+                            voice_info_off["engine"] = "xtts"
+                        elif _off_hint == "edge_tts":
+                            voice_info_off = dict(voice_info_off)
+                            voice_info_off["engine"] = "edge"
+                        detected_lang = _detect_language(transcript)
+                        mp3 = await _tts_generate(full_resp, voice_info_off, detected_lang)
+                        if mp3:
+                            await websocket.send_text(json.dumps({
+                                "type": "tts_audio",
+                                "session_id": session_id,
+                                "audio_b64": _b64off.b64encode(mp3).decode("ascii"),
+                                "is_final": True,
+                            }))
+                        session.transcript_buffer += f"\nAura: {full_resp}"
+                        save_turn(user_id=user_id, role="assistant", content=full_resp, session_id=session_id)
+
+                        # Clear barge-in context after successful response
+                        if session.interrupted_response:
+                            session.interrupted_response = ""
+                            session.interrupted_query = ""
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("[%s] Whisper poll error: %s", session_id, exc)
+                await asyncio.sleep(1)  # back off on errors
 
     try:
         while True:
             try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_text(),
+                ws_msg = await asyncio.wait_for(
+                    websocket.receive(),
                     timeout=SILENCE_TIMEOUT,
                 )
                 last_activity = time.time()
@@ -1677,6 +2389,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # User has been silent — send proactive prompt
                 await _send_silence_prompt()
                 last_activity = time.time()
+                continue
+
+            # ── Handle binary frames (raw PCM for offline Whisper STT) ─────
+            if "bytes" in ws_msg and ws_msg["bytes"]:
+                if not offline_mode:
+                    continue  # ignore binary chunks in online mode
+                pcm_bytes = ws_msg["bytes"]
+                chunk = np.frombuffer(pcm_bytes, dtype=np.float32)
+                if len(chunk) == 0:
+                    continue
+                if whisper_stream_proc is None:
+                    _init_whisper_stream()
+                if whisper_stream_proc is not None:
+                    whisper_stream_proc.feed(chunk)
+                continue
+
+            # ── Handle text frames (JSON messages) ──────────────────────
+            raw = ws_msg.get("text", "")
+            if not raw:
                 continue
 
             try:
@@ -1690,9 +2421,98 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             msg_type = msg.get("type")
 
+            # ── Barge-in event (user interrupted Alita) ───────────────────
+            if msg_type == "barge_in":
+                partial_response = msg.get("partial_response", "").strip()
+                original_query = msg.get("original_query", "").strip()
+
+                # Signal the active pipeline to cancel
+                session.pipeline_cancel = True  # type: ignore[assignment]
+                session.barge_in_count = getattr(session, 'barge_in_count', 0) + 1  # type: ignore[assignment]
+                # Set cancel_event for instant mid-LLM abort
+                if hasattr(session, 'cancel_event') and session.cancel_event:  # type: ignore[attr-defined]
+                    session.cancel_event.set()  # type: ignore[union-attr]
+
+                # Store interrupted context (frontend may send more accurate data
+                # than what pipeline saved, since frontend knows exactly what was spoken)
+                if partial_response:
+                    session.interrupted_response = partial_response  # type: ignore[assignment]
+                if original_query:
+                    session.interrupted_query = original_query  # type: ignore[assignment]
+
+                log.info(
+                    "[%s] 🔇 BARGE-IN #%d | interrupted_response=%d chars | original_query='%s'",
+                    session_id, session.barge_in_count,  # type: ignore[attr-defined]
+                    len(partial_response), original_query[:50],  # type: ignore[index]
+                )
+                continue
+
+            # ── Speculative query (interim transcript — pre-generate) ────────
+            if msg_type == "speculative_query":
+                spec_text = msg.get("text", "").strip()
+                spec_id = msg.get("spec_id", 0)
+                if not spec_text:
+                    continue
+
+                # Cancel any previous speculative generation
+                if hasattr(session, '_spec_cancel') and session._spec_cancel:  # type: ignore[attr-defined]
+                    session._spec_cancel.set()  # type: ignore[union-attr]
+
+                cancel_evt = asyncio.Event()
+                session._spec_cancel = cancel_evt  # type: ignore[assignment]
+                session._spec_id = spec_id  # type: ignore[assignment]
+
+                async def _run_speculative(s, text, cancel, sid):
+                    """Run LLM in background, cache result if not cancelled."""
+                    try:
+                        loop = asyncio.get_event_loop()
+                        tokens, _ = await loop.run_in_executor(
+                            None, _llm_generate_sync, s, text
+                        )
+                        if cancel.is_set():
+                            return  # cancelled before completion
+                        result = "".join(tokens)
+                        s._spec_result = result  # type: ignore[assignment]
+                        s._spec_text = text.lower().strip()  # type: ignore[assignment]
+                        log.info("[%s] Speculative #%d cached (%d chars) for: '%s'",
+                                 session_id, sid, len(result), text[:50])
+                    except Exception as e:
+                        log.warning("[%s] Speculative error: %s", session_id, e)
+
+                asyncio.create_task(_run_speculative(session, spec_text, cancel_evt, spec_id))
+                log.info("[%s] ⚡ Speculative #%d started: '%s'", session_id, spec_id, spec_text[:50])
+                continue
+
+            # ── Cancel speculative (final transcript coming) ───────────────
+            if msg_type == "cancel_speculative":
+                if hasattr(session, '_spec_cancel') and session._spec_cancel:  # type: ignore[attr-defined]
+                    session._spec_cancel.set()  # type: ignore[union-attr]
+                continue
+
             # ── Text message (Web Speech API / keyboard) ──────────────────
             if msg_type == "text_message":
                 text_input = msg.get("text", "").strip()
+                if not text_input:
+                    continue
+
+                # ── Check speculative cache first ─────────────────────────
+                spec_hit = False
+                if hasattr(session, '_spec_result') and session._spec_result:  # type: ignore[attr-defined]
+                    spec_text_cached = getattr(session, '_spec_text', '')
+                    input_norm = text_input.lower().strip()
+                    # Check word overlap (70%+ = cache hit)
+                    cached_words = set(spec_text_cached.split())
+                    input_words = set(input_norm.split())
+                    if cached_words and input_words:
+                        overlap = len(cached_words & input_words) / max(len(input_words), 1)
+                        if overlap >= 0.7:
+                            spec_hit = True
+                            log.info("[%s] ⚡ SPECULATIVE HIT (%.0f%% overlap) — using cached response",
+                                     session_id, overlap * 100)
+
+                # Cancel any remaining speculative task
+                if hasattr(session, '_spec_cancel') and session._spec_cancel:  # type: ignore[attr-defined]
+                    session._spec_cancel.set()  # type: ignore[union-attr]
                 if not text_input:
                     continue
                 if not check_rate_limit(session):
@@ -1703,11 +2523,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     continue
 
                 loop = asyncio.get_event_loop()
-                session.transcript_buffer += f"\nUser: {text_input}"
-                save_turn(user_id=user_id, role="user", content=text_input, session_id=session_id)
-
-                # Store in semantic memory
-                memory_store(user_id, f"User said: {text_input}")
 
                 # Send user transcript back to frontend for display
                 await websocket.send_text(json.dumps({
@@ -1715,91 +2530,304 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "text": text_input,
                 }))
 
-                tokens, ws_metadata = await loop.run_in_executor(
-                    None, _llm_generate_sync, session, text_input
-                )
-                full_response = ""
-                for i, token in enumerate(tokens):
-                    full_response += token
-                    await websocket.send_text(LLMReply(
-                        session_id=session_id,
-                        token=token,
-                        is_final=(i == len(tokens) - 1),
-                    ).model_dump_json())
-                    await asyncio.sleep(0)
+                # Dispatch text handling as a background task so the WS loop
+                # can continue reading new messages (concurrent listening).
+                # Each task snapshots context and runs LLM+TTS in parallel;
+                # a brief lock serializes only the shared-state writes at the end.
 
-                # TTS for the response — with auto language detection (premium)
-                import base64 as _b64t
+                # Ensure session has a command lock (created once)
+                if not hasattr(session, '_cmd_lock'):
+                    session._cmd_lock = asyncio.Lock()  # type: ignore[assignment]
+                if not hasattr(session, '_cmd_seq'):
+                    session._cmd_seq = 0  # type: ignore[assignment]
+                session._cmd_seq = getattr(session, '_cmd_seq', 0) + 1  # type: ignore[assignment]
+                cmd_id = session._cmd_seq  # type: ignore[attr-defined]
 
-                # Auto-detect language and switch TTS voice (premium only)
-                detected_lang = _detect_language(text_input)
-                current_voice_info = AVAILABLE_VOICES.get(
-                    session.voice_id or "en_jenny",
-                    AVAILABLE_VOICES["en_jenny"]
-                )
-                current_lang = current_voice_info.get("lang", "en")
+                async def _handle_text_message(ws, sess, uid, sid, text, is_spec_hit, cid):
+                    """Process a text query with TRUE STREAMING + sentence-level TTS.
+                    Tokens stream from Groq in real-time; TTS fires per sentence."""
+                    import base64 as _b64t
+                    import queue as _queue
+                    import re as _re_sent
 
-                # Auto-switch for premium users when language changes
-                # BUT skip if user manually chose a voice — respect their pick
-                if (session.tier == "premium" or user_id.startswith("test_")) \
-                   and not session.manual_voice_override \
-                   and detected_lang != current_lang \
-                   and detected_lang in DEFAULT_VOICE:
-                    new_voice_id = DEFAULT_VOICE[detected_lang]
-                    new_voice_info = AVAILABLE_VOICES.get(new_voice_id, current_voice_info)
-                    session.voice_id = new_voice_id
-                    log.info("Auto-switched voice: %s → %s (detected: %s)",
-                             current_voice_info["voice"], new_voice_info["voice"], detected_lang)
+                    # Sentence boundary regex — split on . ! ? but skip Dr. vs. etc.
+                    _SENT_END = _re_sent.compile(
+                        r'(?<![A-Z][a-z])(?<!\d)(?<!\.\.)([.!?])\s+|(\n)'
+                    )
 
-                    # Notify frontend about the voice switch
-                    await websocket.send_text(json.dumps({
-                        "type": "voice_auto_switched",
-                        "voice_id": new_voice_id,
-                        "voice_name": new_voice_info["name"],
-                        "detected_lang": detected_lang,
-                        "stt_lang": "hi-IN" if detected_lang == "hi" else "en-IN",
-                    }))
-                    voice_info = new_voice_info
-                else:
-                    voice_info = current_voice_info
+                    try:
+                        loop = asyncio.get_event_loop()
+                        log.info("[%s] CMD #%d started: '%s'", sid, cid, text[:60])
 
-                mp3_bytes = await _tts_generate_edge(full_response, voice_info["voice"])
-                if mp3_bytes:
-                    await websocket.send_text(TTSAudioFrame(
-                        session_id=session_id,
-                        audio_b64=_b64t.b64encode(mp3_bytes).decode("ascii"),
-                        is_final=True,
-                    ).model_dump_json())
+                        # ── Resolve voice early ───────────────────────────────
+                        detected_lang = _detect_language(text)
+                        current_voice_info = AVAILABLE_VOICES.get(
+                            sess.voice_id or "en_jenny",
+                            AVAILABLE_VOICES["en_jenny"]
+                        )
+                        current_lang = current_voice_info.get("lang", "en")
 
-                session.transcript_buffer += f"\nAura: {full_response}"
-                save_turn(user_id=user_id, role="assistant", content=full_response, session_id=session_id)
+                        if (sess.tier == "premium" or uid.startswith("test_")) \
+                           and not sess.manual_voice_override \
+                           and detected_lang != current_lang \
+                           and detected_lang in DEFAULT_VOICE:
+                            new_voice_id = DEFAULT_VOICE[detected_lang]
+                            new_voice_info = AVAILABLE_VOICES.get(new_voice_id, current_voice_info)
+                            sess.voice_id = new_voice_id
+                            log.info("CMD #%d auto-switched voice: %s → %s",
+                                     cid, current_voice_info["voice"], new_voice_info["voice"])
+                            await ws.send_text(json.dumps({
+                                "type": "voice_auto_switched",
+                                "voice_id": new_voice_id,
+                                "voice_name": new_voice_info["name"],
+                                "detected_lang": detected_lang,
+                                "stt_lang": "hi-IN" if detected_lang == "hi" else "en-IN",
+                            }))
+                            voice_info = new_voice_info
+                        else:
+                            voice_info = current_voice_info
 
-                # Store assistant response in memory
-                memory_store(user_id, f"Alita said: {full_response}")
+                        # ── Speculative cache hit → use immediately ───────────
+                        if is_spec_hit:
+                            full_response = sess._spec_result  # type: ignore[attr-defined]
+                            sess._spec_result = None  # type: ignore[assignment]
+                            sess._spec_text = ""  # type: ignore[assignment]
+                            log.info("[%s] CMD #%d ⚡ speculative hit (%d chars)", sid, cid, len(full_response))
 
-                # Check if automation triggered dictation mode
-                if getattr(session, 'dictation_active', False):
-                    await websocket.send_text(json.dumps({
-                        "type": "dictation_start",
-                        "app": getattr(session, 'dictation_app', ''),
-                    }))
-                    log.info("Dictation mode signaled to frontend for app: %s", session.dictation_app)
+                            # Send as one token
+                            await ws.send_text(json.dumps({
+                                "type": "llm_token", "session_id": sid,
+                                "token": full_response, "cmd_id": cid, "is_final": True,
+                            }))
+                            # Single TTS
+                            mp3 = await _tts_generate(full_response, voice_info, detected_lang)
+                            if mp3:
+                                await ws.send_text(json.dumps({
+                                    "type": "tts_audio", "session_id": sid, "cmd_id": cid,
+                                    "sentence_idx": 0,
+                                    "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                                    "is_final": True,
+                                }))
 
-                # Forward any metadata messages (e.g. app_not_installed, start_song_recognition)
-                for meta_msg in ws_metadata:
-                    meta_type = meta_msg.get("type", "")
-                    if meta_type == "app_not_installed":
-                        await websocket.send_text(json.dumps({
-                            "type": "app_not_installed",
-                            "app": meta_msg.get("app", ""),
-                            "store_url": meta_msg.get("store_url", ""),
+                            async with sess._cmd_lock:  # type: ignore[attr-defined]
+                                sess.transcript_buffer += f"\nUser: {text}\nAura: {full_response}"
+                                save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                                save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                                memory_store(uid, f"User said: {text}")
+                                memory_store(uid, f"Alita said: {full_response}")
+                            log.info("[%s] CMD #%d completed (speculative)", sid, cid)
+                            return
+
+                        # ── Classify query to decide: stream vs batch ─────────
+                        sess._spec_result = None  # type: ignore[assignment]
+                        sess._spec_text = ""  # type: ignore[assignment]
+
+                        from decision_router import classify_query  # type: ignore[import]
+                        query_type = classify_query(text)
+
+                        # Realtime + automation → batch (short responses)
+                        if query_type in ("realtime", "automation"):
+                            tokens_list, ws_metadata = await loop.run_in_executor(
+                                None, _llm_generate_sync, sess, text
+                            )
+                            full_response = ""
+                            for i, tok in enumerate(tokens_list):
+                                full_response += tok
+                                await ws.send_text(json.dumps({
+                                    "type": "llm_token", "session_id": sid,
+                                    "token": tok, "cmd_id": cid,
+                                    "is_final": (i == len(tokens_list) - 1),
+                                }))
+                                await asyncio.sleep(0)
+
+                            # Single TTS for short response
+                            mp3 = await _tts_generate(full_response, voice_info, detected_lang)
+                            if mp3:
+                                await ws.send_text(json.dumps({
+                                    "type": "tts_audio", "session_id": sid, "cmd_id": cid,
+                                    "sentence_idx": 0,
+                                    "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                                    "is_final": True,
+                                }))
+
+                            # Forward metadata
+                            for meta_msg in ws_metadata:
+                                mt = meta_msg.get("type", "")
+                                if mt == "app_not_installed":
+                                    await ws.send_text(json.dumps({
+                                        "type": "app_not_installed",
+                                        "app": meta_msg.get("app", ""),
+                                        "store_url": meta_msg.get("store_url", ""),
+                                    }))
+                                elif mt == "start_song_recognition":
+                                    await ws.send_text(json.dumps({"type": "start_song_recognition"}))
+
+                            async with sess._cmd_lock:  # type: ignore[attr-defined]
+                                sess.transcript_buffer += f"\nUser: {text}\nAura: {full_response}"
+                                save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                                save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                                memory_store(uid, f"User said: {text}")
+                                memory_store(uid, f"Alita said: {full_response}")
+
+                            if getattr(sess, 'dictation_active', False):
+                                await ws.send_text(json.dumps({
+                                    "type": "dictation_start",
+                                    "app": getattr(sess, 'dictation_app', ''),
+                                }))
+
+                            log.info("[%s] CMD #%d completed (batch/%s): %d chars", sid, cid, query_type, len(full_response))
+                            return
+
+                        # ──────────────────────────────────────────────────────
+                        # GENERAL → TRUE STREAMING + SENTENCE TTS PIPELINE
+                        # ──────────────────────────────────────────────────────
+                        from threads.general_handler import handle_general_stream  # type: ignore[import]
+
+                        token_q: _queue.Queue = _queue.Queue()
+                        system_prompt = _build_system_prompt(sess, user_text=text)
+                        max_history = 15 if sess.tier == "premium" else 5
+                        history = _build_history(sess, max_history)
+
+                        # Start LLM streaming in a background thread
+                        loop.run_in_executor(
+                            None,
+                            handle_general_stream,
+                            text, sess, settings, system_prompt, history,
+                            settings.llm_max_tokens if sess.tier == "premium" else settings.llm_max_tokens_free,
+                            response_cache, token_q, None,
+                        )
+
+                        # ── Consume tokens + sentence-level TTS ───────────────
+                        full_response = ""
+                        sentence_buffer = ""
+                        sentence_idx = 0
+                        tts_tasks = []  # track TTS tasks for final cleanup
+
+                        async def _send_sentence_tts(sent_text, s_idx, vi, lang):
+                            """Generate and send TTS for one sentence."""
+                            sent_text = sent_text.strip()
+                            if not sent_text or len(sent_text) < 3:
+                                return
+                            try:
+                                mp3 = await _tts_generate(sent_text, vi, lang)
+                                if mp3:
+                                    await ws.send_text(json.dumps({
+                                        "type": "tts_audio",
+                                        "session_id": sid,
+                                        "cmd_id": cid,
+                                        "sentence_idx": s_idx,
+                                        "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                                        "is_final": False,
+                                    }))
+                            except Exception as tts_err:
+                                log.warning("CMD #%d sentence TTS #%d error: %s", cid, s_idx, tts_err)
+
+                        while True:
+                            # Poll queue — non-blocking with short timeout
+                            try:
+                                token = await loop.run_in_executor(  # type: ignore[arg-type]
+                                    None, lambda: token_q.get(timeout=0.05)
+                                )
+                            except Exception:
+                                # Queue empty, try again
+                                await asyncio.sleep(0.01)
+                                continue
+
+                            if token is None:
+                                # Stream complete — flush remaining sentence buffer
+                                break
+
+                            # Send token to frontend immediately
+                            full_response += token  # type: ignore[operator]
+                            sentence_buffer += token  # type: ignore[operator]
+
+                            await ws.send_text(json.dumps({
+                                "type": "llm_token",
+                                "session_id": sid,
+                                "token": token,
+                                "cmd_id": cid,
+                                "is_final": False,
+                            }))
+
+                            # Check for sentence boundary
+                            if _SENT_END.search(sentence_buffer):  # type: ignore[union-attr]
+                                # Split at the LAST sentence boundary
+                                parts = _SENT_END.split(sentence_buffer)  # type: ignore[union-attr]
+                                # Everything up to last boundary = complete sentence
+                                complete = ""
+                                remainder = ""
+                                for j, p in enumerate(parts):
+                                    if p is None:
+                                        continue
+                                    if j < len(parts) - 1:
+                                        complete += p  # type: ignore[operator]
+                                    else:
+                                        remainder = p
+
+                                if complete.strip():  # type: ignore[union-attr]
+                                    # Fire TTS for this sentence immediately
+                                    task = asyncio.create_task(
+                                        _send_sentence_tts(complete, sentence_idx, voice_info, detected_lang)
+                                    )
+                                    tts_tasks.append(task)
+                                    sentence_idx += 1
+
+                                sentence_buffer = remainder
+
+                        # ── Flush final sentence buffer ───────────────────────
+                        if sentence_buffer.strip():  # type: ignore[union-attr]
+                            task = asyncio.create_task(
+                                _send_sentence_tts(sentence_buffer, sentence_idx, voice_info, detected_lang)
+                            )
+                            tts_tasks.append(task)
+                            sentence_idx += 1
+
+                        # Send final llm_token marker
+                        await ws.send_text(json.dumps({
+                            "type": "llm_token",
+                            "session_id": sid,
+                            "token": "",
+                            "cmd_id": cid,
+                            "is_final": True,
                         }))
-                        log.info("Sent app_not_installed to frontend: %s", meta_msg.get("app"))
-                    elif meta_type == "start_song_recognition":
-                        await websocket.send_text(json.dumps({
-                            "type": "start_song_recognition",
+
+                        # Wait for all sentence TTS tasks to finish
+                        if tts_tasks:
+                            await asyncio.gather(*tts_tasks, return_exceptions=True)
+
+                        # Send TTS final marker
+                        await ws.send_text(json.dumps({
+                            "type": "tts_audio",
+                            "session_id": sid,
+                            "cmd_id": cid,
+                            "sentence_idx": sentence_idx,
+                            "audio_b64": "",
+                            "is_final": True,
                         }))
-                        log.info("Sent start_song_recognition trigger to frontend")
+
+                        # ── LOCK: save to history ─────────────────────────────
+                        async with sess._cmd_lock:  # type: ignore[attr-defined]
+                            sess.transcript_buffer += f"\nUser: {text}\nAura: {full_response}"
+                            save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                            save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                            memory_store(uid, f"User said: {text}")
+                            memory_store(uid, f"Alita said: {full_response}")
+
+                        if getattr(sess, 'dictation_active', False):
+                            await ws.send_text(json.dumps({
+                                "type": "dictation_start",
+                                "app": getattr(sess, 'dictation_app', ''),
+                            }))
+
+                        log.info("[%s] CMD #%d completed (stream): %d chars, %d sentences",
+                                 sid, cid, len(full_response), sentence_idx)
+
+                    except Exception as e:
+                        log.error("[%s] CMD #%d error: %s", sid, cid, e, exc_info=True)
+
+                asyncio.create_task(
+                    _handle_text_message(websocket, session, user_id, session_id, text_input, spec_hit, cmd_id)
+                )
 
                 continue
 
@@ -1822,6 +2850,53 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 asyncio.create_task(
                     run_full_pipeline(websocket, session, utterance)
                 )
+                continue
+
+            # ── Offline audio streaming (Whisper STT) ──────────────────────
+            if msg_type == "audio_chunk_stream":
+                if not offline_mode:
+                    continue  # ignore streaming chunks in online mode
+                pcm_data = msg.get("pcm_float32", [])
+                if not pcm_data:
+                    continue
+                if whisper_stream_proc is None:
+                    _init_whisper_stream()
+                if whisper_stream_proc is not None:
+                    chunk = np.array(pcm_data, dtype=np.float32)
+                    whisper_stream_proc.feed(chunk)
+                continue
+
+            # ── Connectivity status (online/offline switch) ────────────────
+            if msg_type == "connectivity_status":
+                is_online = msg.get("online", True)
+                was_offline = offline_mode
+                offline_mode = not is_online
+
+                if offline_mode and not was_offline:
+                    # Switching to offline mode — processor already pre-initialized
+                    log.info("[%s] 📡 Switching to OFFLINE mode (Whisper streaming STT)", session_id)
+                    _init_whisper_stream()  # no-op if already inited
+                    # Start polling task if not already running
+                    if whisper_poll_task is None or whisper_poll_task.done():  # type: ignore[union-attr]
+                        whisper_poll_task = asyncio.create_task(_whisper_poll_loop())
+                    await websocket.send_text(json.dumps({
+                        "type": "stt_mode",
+                        "mode": "offline",
+                        "detail": "Switched to local Whisper STT (offline mode)",
+                    }))
+                elif not offline_mode and was_offline:
+                    # Switching back to online mode — keep processor alive for fast re-switch
+                    log.info("[%s] 📡 Switching to ONLINE mode (Web Speech API STT)", session_id)
+                    if whisper_poll_task and not whisper_poll_task.done():  # type: ignore[union-attr]
+                        whisper_poll_task.cancel()  # type: ignore[union-attr]
+                    # Don't destroy processor — just reset buffers for fast re-switch
+                    if whisper_stream_proc:
+                        whisper_stream_proc.reset()
+                    await websocket.send_text(json.dumps({
+                        "type": "stt_mode",
+                        "mode": "online",
+                        "detail": "Switched to Web Speech API (online mode)",
+                    }))
                 continue
 
             # ── Ping ──────────────────────────────────────────────────────
@@ -1852,8 +2927,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     }))
                     continue
 
-                session.voice_id = voice_id
-                session.manual_voice_override = True  # User manually picked — lock it
+                session.voice_id = voice_id  # type: ignore[assignment]
+                session.manual_voice_override = True  # type: ignore[assignment]
                 log.info("Voice changed to '%s' for session=%s (manual override)", voice_id, session_id)
                 # Send stt_lang so frontend updates speech recognition language
                 voice_lang = voice.get("lang", "en")
@@ -1863,7 +2938,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "voice_id": voice_id,
                     "voice_name": voice["name"],
                     "lang": voice_lang,
-                    "stt_lang": stt_lang_map.get(voice_lang, "en-IN"),
+                    "stt_lang": stt_lang_map.get(str(voice_lang or "en"), "en-IN"),
                 }))
                 continue
 
@@ -1888,7 +2963,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 try:
                     import tempfile, base64, subprocess
 
-                    from shazamio import Shazam
+                    from shazamio import Shazam  # type: ignore[import-untyped]
 
                     # Decode the WebM audio from frontend
                     audio_bytes = base64.b64decode(audio_b64)
@@ -1897,12 +2972,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     webm_path = None
                     wav_path = None
                     try:
-                        import imageio_ffmpeg
+                        import imageio_ffmpeg  # type: ignore[import-untyped]
                         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
                         # CRITICAL: Set pydub's converter to our bundled ffmpeg
                         # so shazamio's internal AudioSegment.from_file() works
-                        from pydub import AudioSegment
+                        from pydub import AudioSegment  # type: ignore[import-untyped]
                         AudioSegment.converter = ffmpeg_exe
 
                         # Save raw WebM
@@ -1932,7 +3007,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             timeout=15,
                         )
                         if proc.returncode != 0:
-                            raise RuntimeError(f"ffmpeg conversion failed: {proc.stderr.decode('utf-8', errors='replace')[:200]}")
+                            raise RuntimeError(f"ffmpeg conversion failed: {proc.stderr.decode('utf-8', errors='replace')[:200]}")  # type: ignore[misc]
 
                         log.info("[Song] Converted WebM → WAV via imageio-ffmpeg (%d bytes → %s)",
                                  len(audio_bytes), wav_path)
@@ -1991,45 +3066,48 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         tts_text = f"That's {song_title} by {song_artist}"
                         if album:
                             tts_text += f", from the album {album}"
-                        tts_text += ". Let me play it for you!"
+                        tts_text += ". Would you like me to play it?"
 
                         # Generate TTS for the answer
                         voice_info = AVAILABLE_VOICES.get(
-                            session.voice_id,
+                            session.voice_id,  # type: ignore[attr-defined]
                             AVAILABLE_VOICES["en_jenny"]
                         )
                         try:
                             import base64 as _b64sr
-                            mp3_bytes = await _tts_generate_edge(tts_text, voice_info["voice"])
+                            mp3_bytes = await _tts_generate(tts_text, voice_info, "en")
                             if mp3_bytes:
-                                await websocket.send_text(TTSAudioFrame(
-                                    session_id=session_id,
-                                    audio_b64=_b64sr.b64encode(mp3_bytes).decode("ascii"),
-                                    is_final=True,
-                                ).model_dump_json())
+                                await websocket.send_text(json.dumps({
+                                    "type": "tts_audio",
+                                    "session_id": session_id,
+                                    "audio_b64": _b64sr.b64encode(mp3_bytes).decode("ascii"),
+                                    "is_final": True,
+                                }))
                         except Exception as tts_err:
                             log.warning("TTS for song result failed: %s", tts_err)
 
-                        # Auto-play the identified song on YouTube
-                        try:
-                            from threads.automation_handler import open_music
-                            play_query = f"{song_title} {song_artist}"
-                            loop = asyncio.get_event_loop()
-                            # Small delay so TTS finishes before browser opens
-                            await asyncio.sleep(2)
-                            play_result = await loop.run_in_executor(
-                                None, open_music, play_query
-                            )
-                            log.info("Auto-playing song: %s → %s",
-                                     play_query, play_result.get("status"))
-                            # Notify frontend the song is being played
-                            await websocket.send_text(json.dumps({
-                                "type": "song_recognition_status",
-                                "status": "playing",
-                                "detail": f"Now playing {song_title} by {song_artist} on YouTube",
-                            }))
-                        except Exception as play_err:
-                            log.warning("Auto-play after song recognition failed: %s", play_err)
+                        # Store the recognized song in session memory
+                        # Use the proper Pydantic field (last_identified_song) so the
+                        # LLM system prompt always has context for follow-up questions.
+                        song_label = f"{song_title} by {song_artist}"
+                        if album:
+                            song_label += f" (album: {album})"
+                        session.last_identified_song = song_label  # type: ignore[union-attr]
+
+                        # Also write a note into the transcript buffer so conversation
+                        # history (which feeds the LLM) reflects the identification.
+                        session.transcript_buffer += (  # type: ignore[union-attr]
+                            f"\n[System Note: Song identified — {song_label}]"
+                        )
+
+                        # Keep the dynamic attrs for backward-compat (e.g., "yes, play it")
+                        session._recognized_song = {  # type: ignore[attr-defined]
+                            "title": song_title,
+                            "artist": song_artist,
+                            "query": f"{song_title} {song_artist}",
+                        }
+                        session._last_recognized_song = session._recognized_song.copy()  # type: ignore[attr-defined]
+                        log.info("Song stored in session memory: %s", song_label)
 
                     else:
                         await websocket.send_text(json.dumps({
@@ -2060,13 +3138,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if not dictation_text:
                     continue
                 try:
-                    import pyautogui
+                    import pyautogui  # type: ignore[import-untyped]
                     pyautogui.PAUSE = 0.02
                     if dictation_text.isascii():
                         pyautogui.typewrite(dictation_text + " ", interval=0.01)
                     else:
                         # Non-ASCII (Hindi etc): use clipboard paste
-                        import pyperclip
+                        import pyperclip  # type: ignore[import-untyped]
                         pyperclip.copy(dictation_text + " ")
                         pyautogui.hotkey("ctrl", "v")
                     log.info("Dictation typed: %s", dictation_text[:40])
@@ -2083,7 +3161,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 continue
 
             if msg_type == "dictation_stop":
-                session.dictation_active = False
+                session.dictation_active = False  # type: ignore[misc]
                 log.info("Dictation mode stopped for session=%s", session_id)
                 await websocket.send_text(json.dumps({
                     "type": "dictation_stopped",
@@ -2100,84 +3178,229 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     except Exception:
         log.exception("Unhandled WS error | session=%s", session_id)
     finally:
+        # Cancel offline Whisper streaming poll task if running
+        if whisper_poll_task and not whisper_poll_task.done():
+            whisper_poll_task.cancel()
+        if whisper_stream_proc:
+            whisper_stream_proc.reset()
         active_sessions.pop(session_id, None)
         _session_websockets.pop(session_id, None)
         log.info("Session cleaned up: %s", session_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §14  STRIPE WEBHOOK  /webhooks/stripe
+# §14  RAZORPAY WEBHOOK  /webhooks/razorpay
 # ─────────────────────────────────────────────────────────────────────────────
-@app.post("/webhooks/stripe", status_code=200)
-async def stripe_webhook(request: Request):
+razorpay_client = None  # initialized in lifespan
+
+
+@app.post("/webhooks/razorpay", status_code=200)
+async def razorpay_webhook(request: Request):
     """
-    Stripe → server-to-server only.
+    Razorpay → server-to-server only.
     Signature verified cryptographically — cannot be spoofed.
     Handles:
-      checkout.session.completed   → upgrade to premium
-      customer.subscription.deleted → downgrade to free
-      invoice.payment_failed        → log payment failure
+      subscription.activated       → upgrade to premium
+      subscription.cancelled       → downgrade to free
+      payment.captured             → confirm payment
+      payment.failed               → log payment failure
 
     Pricing:
-      Monthly  plan = $19  / month
-      Annual   plan = $209 / year  (saves $19 vs monthly)
+      Monthly  plan = $99  / month
+      Annual   plan = $1100 / year
     """
-    payload    = await request.body()
-    sig_header = request.headers.get("stripe-signature", "")
+    from tier_store import set_tier as _set_tier, find_user_by_razorpay_customer  # type: ignore[import]
 
+    payload = await request.body()
+    sig_header = request.headers.get("x-razorpay-signature", "")
+
+    # ── Verify webhook signature ──────────────────────────────────────────
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, settings.stripe_webhook_secret
-        )
-    except stripe.error.SignatureVerificationError:
-        log.warning("Stripe webhook: invalid signature — rejected.")
+        if razorpay_client and settings.razorpay_webhook_secret:
+            razorpay_client.utility.verify_webhook_signature(
+                payload.decode("utf-8"), sig_header, settings.razorpay_webhook_secret
+            )
+        else:
+            log.warning("Razorpay webhook: no client or secret — skipping signature verification.")
+    except razorpay.errors.SignatureVerificationError:  # type: ignore[attr-defined]
+        log.warning("Razorpay webhook: invalid signature — rejected.")
         raise HTTPException(status_code=400, detail="Invalid signature.")
     except Exception as exc:
-        log.error("Stripe webhook error: %s", exc)
+        log.error("Razorpay webhook error: %s", exc)
         raise HTTPException(status_code=400, detail="Webhook processing error.")
 
-    event_type = event.get("type")
-    log.info("Stripe event received: %s", event_type)
+    body = json.loads(payload)
+    event_type = body.get("event", "")
+    log.info("Razorpay event received: %s", event_type)
 
-    # ── Checkout completed → upgrade user ─────────────────────────────────
-    if event_type == "checkout.session.completed":
-        obj                  = event["data"]["object"]
-        client_reference_id  = obj.get("client_reference_id")  # Supabase user_id
-        payment_status       = obj.get("payment_status")
-        plan                 = obj.get("metadata", {}).get("plan", "monthly")
-        amount_total         = obj.get("amount_total", 0)
+    entity = body.get("payload", {}).get("subscription", {}).get("entity", {})
+    payment_entity = body.get("payload", {}).get("payment", {}).get("entity", {})
 
-        if client_reference_id and payment_status == "paid":
+    # ── Subscription activated → upgrade user ─────────────────────────────
+    if event_type in ("subscription.activated", "subscription.charged"):
+        user_id = entity.get("notes", {}).get("user_id", "")
+        plan = entity.get("notes", {}).get("plan", "monthly")
+        razorpay_customer_id = entity.get("customer_id", "")
+
+        if user_id:
             log.info(
-                "Upgrading user=%s to premium | plan=%s | amount=%s cents",
-                client_reference_id, plan, amount_total,
+                "Upgrading user=%s to premium | plan=%s | subscription_id=%s",
+                user_id, plan, entity.get("id", ""),
             )
-            # TODO Phase 2:
-            # await supabase_admin_client
-            #     .table("user_tiers")
-            #     .upsert({
-            #         "user_id":    client_reference_id,
-            #         "tier":       "premium",
-            #         "plan":       plan,
-            #         "updated_at": datetime.utcnow().isoformat(),
-            #     })
-            #     .execute()
+            _set_tier(
+                user_id=user_id,
+                tier="premium",
+                plan=plan,
+                razorpay_customer_id=razorpay_customer_id,
+            )
+
+            # Update any active WebSocket session in real time
+            for sid, session in active_sessions.items():
+                if session.user_id == user_id:
+                    session.tier = "premium"
+                    ws = _session_websockets.get(sid)
+                    if ws:
+                        try:
+                            await ws.send_text(json.dumps({
+                                "type": "tier_updated",
+                                "tier": "premium",
+                                "plan": plan,
+                            }))
+                        except Exception:
+                            pass
+                    break
 
     # ── Subscription cancelled → downgrade user ───────────────────────────
-    elif event_type == "customer.subscription.deleted":
-        customer_id = event["data"]["object"].get("customer")
-        log.info("Subscription cancelled | stripe_customer=%s", customer_id)
-        # TODO Phase 2:
-        # user_id = await lookup_user_by_stripe_customer(customer_id)
-        # await downgrade_user_to_free(user_id)
+    elif event_type == "subscription.cancelled":
+        customer_id = entity.get("customer_id", "")
+        log.info("Subscription cancelled | razorpay_customer=%s", customer_id)
+        user_id = find_user_by_razorpay_customer(customer_id)
+        if user_id:
+            _set_tier(user_id=user_id, tier="free")
+            # Update any active WebSocket session
+            for sid, session in active_sessions.items():
+                if session.user_id == user_id:
+                    session.tier = "free"
+                    ws = _session_websockets.get(sid)
+                    if ws:
+                        try:
+                            await ws.send_text(json.dumps({
+                                "type": "tier_updated",
+                                "tier": "free",
+                            }))
+                        except Exception:
+                            pass
+                    break
+        else:
+            log.warning("Subscription cancelled but no user found for razorpay_customer=%s", customer_id)
 
     # ── Payment failed → log for follow-up ───────────────────────────────
-    elif event_type == "invoice.payment_failed":
-        customer_id = event["data"]["object"].get("customer")
-        log.warning("Payment failed | stripe_customer=%s", customer_id)
-        # TODO Phase 2: send notification email, start grace period
+    elif event_type == "payment.failed":
+        customer_id = payment_entity.get("customer_id", "")
+        log.warning("Payment failed | razorpay_customer=%s | error=%s",
+                    customer_id, payment_entity.get("error_description", ""))
 
     return JSONResponse({"status": "received"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §14b  RAZORPAY SUBSCRIPTION CREATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CheckoutRequest(BaseModel):
+    plan: str = "monthly"  # "monthly" | "annual"
+
+
+@app.post("/payments/create-checkout-session")
+async def create_checkout_session(req: CheckoutRequest, request: Request):
+    """
+    Create a Razorpay subscription and return checkout data.
+    Frontend uses Razorpay Checkout.js to complete payment.
+
+    Supports: UPI, Cards, Net Banking, Wallets, International Cards.
+
+    Requires Authorization: Bearer <JWT> header.
+    """
+    # ── Auth ──────────────────────────────────────────────────────────────
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        claims = decode_supabase_jwt(token)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+
+    user_id = claims["user_id"]
+
+    # ── Validate plan ─────────────────────────────────────────────────────
+    if req.plan not in ("monthly", "annual"):
+        raise HTTPException(status_code=400, detail="Plan must be 'monthly' or 'annual'.")
+
+    if not razorpay_client:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay not configured. Set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET in .env."
+        )
+
+    plan_id = (
+        settings.razorpay_plan_monthly if req.plan == "monthly"
+        else settings.razorpay_plan_annual
+    )
+
+    if not plan_id:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Razorpay Plan ID for '{req.plan}' not configured. Set RAZORPAY_PLAN_MONTHLY / RAZORPAY_PLAN_ANNUAL in .env."
+        )
+
+    # ── Create Razorpay Subscription ──────────────────────────────────────
+    try:
+        subscription = razorpay_client.subscription.create({
+            "plan_id": plan_id,
+            "total_count": 12 if req.plan == "monthly" else 1,
+            "quantity": 1,
+            "notes": {
+                "user_id": user_id,
+                "plan": req.plan,
+            },
+        })
+        log.info("Razorpay subscription created: user=%s plan=%s sub_id=%s",
+                 user_id, req.plan, subscription.get("id"))
+        return JSONResponse({
+            "subscription_id": subscription.get("id"),
+            "razorpay_key_id": settings.razorpay_key_id,
+            "plan": req.plan,
+            "amount": 9900 if req.plan == "monthly" else 110000,  # in cents (USD)
+            "currency": "USD",
+            "name": "Alita Premium",
+            "description": f"Alita Premium — {'Monthly' if req.plan == 'monthly' else 'Annual'} Subscription",
+        })
+    except Exception as exc:
+        log.error("Razorpay subscription error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Razorpay error: {str(exc)}")
+
+
+@app.get("/payments/status")
+async def payment_status(request: Request):
+    """
+    Check the current tier for the authenticated user.
+    Frontend can call this after payment to verify upgrade.
+
+    Requires Authorization: Bearer <JWT> header.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        claims = decode_supabase_jwt(token)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+
+    user_id = claims["user_id"]
+    tier = get_user_tier(user_id)
+    return JSONResponse({"user_id": user_id, "tier": tier})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2185,9 +3408,16 @@ async def stripe_webhook(request: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/voices")
 async def list_voices():
-    """List available voice models with download status, language, and quality."""
+    """List available voice models with engine type, download status, language, and quality."""
     voices = []
     for vid, info in AVAILABLE_VOICES.items():
+        engine_type = info.get("engine", "edge")
+        # XTTS voices are only available if the engine is loaded
+        if engine_type == "xtts":
+            is_available = engines.xtts_engine is not None and engines.xtts_engine.available  # type: ignore[union-attr]
+        else:
+            is_available = True  # Edge TTS is always available
+
         voices.append({
             "id": vid,
             "name": info["name"],
@@ -2195,9 +3425,128 @@ async def list_voices():
             "tier_required": info["tier_required"],
             "lang": info["lang"],
             "quality": info.get("quality", "high"),
-            "available": True,  # Edge TTS voices are always available (cloud-based)
+            "engine": engine_type,
+            "available": is_available,
         })
+
+    # Also include dynamically registered custom voices
+    if engines.xtts_engine and engines.xtts_engine.available:  # type: ignore[union-attr]
+        for custom_voice in engines.xtts_engine.list_voices():  # type: ignore[union-attr]
+            if custom_voice["category"] == "custom":
+                custom_id = f"xtts_custom_{custom_voice['id']}"
+                if custom_id not in [v["id"] for v in voices]:
+                    voices.append({
+                        "id": custom_id,
+                        "name": f"{custom_voice['name']} (Custom Clone)",
+                        "description": "Your custom cloned voice — XTTS v2",
+                        "tier_required": "free",
+                        "lang": "en",
+                        "quality": "ultra",
+                        "engine": "xtts",
+                        "available": True,
+                    })
+
     return {"voices": voices}
+
+
+@app.post("/voices/upload")
+async def upload_voice(request: Request):
+    """
+    Upload a voice sample WAV for XTTS v2 voice cloning.
+    
+    Accepts multipart form data with:
+      - file: WAV audio file (6-30 seconds, mono, 16-bit)
+      - name: (optional) Human-readable name for the voice
+      - lang: (optional) Primary language code (default: "en")
+    """
+    import shutil
+    from pathlib import Path as _Path
+
+    if not engines.xtts_engine or not engines.xtts_engine.available:
+        raise HTTPException(
+            status_code=503,
+            detail="XTTS v2 engine not available. Voice upload requires GPU.",
+        )
+
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded. Send a WAV file as 'file'.")
+
+    voice_name = form.get("name", file.filename.rsplit(".", 1)[0] if file.filename else "custom_voice")
+    voice_lang = form.get("lang", "en")
+
+    # Sanitize filename
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in voice_name).lower()
+    if not safe_name:
+        safe_name = "custom_voice"
+
+    # Save file
+    from engines.tts_xtts import VOICES_CUSTOM_DIR  # type: ignore[import]
+    VOICES_CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    dest_path = VOICES_CUSTOM_DIR / f"{safe_name}.wav"
+
+    content = await file.read()
+    if len(content) < 1000:
+        raise HTTPException(status_code=400, detail="File too small. Need at least 6 seconds of audio.")
+    if len(content) > 50_000_000:
+        raise HTTPException(status_code=400, detail="File too large. Maximum 50MB.")
+
+    with open(dest_path, "wb") as f:
+        f.write(content)  # type: ignore[arg-type]
+
+    # Pre-compute speaker embedding for instant use
+    try:
+        engines.xtts_engine._get_speaker_conditioning(str(dest_path))  # type: ignore[union-attr]
+    except Exception as exc:
+        log.warning("Failed to pre-cache uploaded voice: %s", exc)
+
+    # Register as a dynamic voice
+    voice_id = f"xtts_custom_{safe_name}"
+    AVAILABLE_VOICES[voice_id] = {
+        "name": f"{voice_name} (Custom Clone)",
+        "voice": None,
+        "speaker_wav": str(dest_path),
+        "engine": "xtts",
+        "description": f"Custom cloned voice: {voice_name}",
+        "tier_required": "free",
+        "lang": voice_lang,
+        "quality": "ultra",
+    }
+
+    log.info("Custom voice uploaded: %s → %s", voice_name, dest_path)
+    return {
+        "voice_id": voice_id,
+        "name": voice_name,
+        "path": str(dest_path),
+        "size_kb": round(len(content) / 1024, 1),  # type: ignore[arg-type]
+        "message": f"Voice '{voice_name}' uploaded successfully! Select it from the voice picker.",
+    }
+
+
+@app.delete("/voices/{voice_id}")
+async def delete_voice(voice_id: str):
+    """Delete a custom cloned voice."""
+    if not voice_id.startswith("xtts_custom_"):
+        raise HTTPException(status_code=400, detail="Can only delete custom voices.")
+
+    if voice_id not in AVAILABLE_VOICES:
+        raise HTTPException(status_code=404, detail="Voice not found.")
+
+    voice_info = AVAILABLE_VOICES[voice_id]
+    wav_path = voice_info.get("speaker_wav", "")
+
+    # Remove file
+    if wav_path and os.path.exists(wav_path):
+        try:
+            os.remove(wav_path)
+        except OSError as exc:
+            log.warning("Failed to delete voice file: %s", exc)
+
+    # Remove from registry
+    del AVAILABLE_VOICES[voice_id]  # type: ignore[attr-defined]
+    log.info("Custom voice deleted: %s", voice_id)
+    return {"message": f"Voice '{voice_id}' deleted successfully."}
 
 
 @app.get("/languages")
@@ -2251,6 +3600,7 @@ async def health_check():
             "whisper":  engines.whisper_model    is not None,
             "wav2vec2": engines.wav2vec2_model   is not None,
             "memory":   engines.memory_collection is not None,
+            "xtts":     engines.xtts_engine.status() if engines.xtts_engine else {"available": False},  # type: ignore[union-attr]
         },
         "security": {
             "jwks_loaded":    len(_jwks_keys) > 0,
@@ -2275,7 +3625,7 @@ async def gemini_vision(req: VisionRequest):
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
 
     try:
-        import google.generativeai as genai
+        import google.generativeai as genai  # type: ignore[import-untyped]
         import base64
 
         genai.configure(api_key=key_rotator.get_key())
@@ -2299,19 +3649,19 @@ async def gemini_vision(req: VisionRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 # CHROMADB SEMANTIC MEMORY — Long-term user memory
 # ─────────────────────────────────────────────────────────────────────────────
-def memory_store(user_id: str, text: str, metadata: dict = None):
+def memory_store(user_id: str, text: str, metadata: Optional[Dict[str, Any]] = None):
     """Store a memory in ChromaDB for long-term recall."""
     if not engines.memory_collection:
         return
     try:
         import uuid
         doc_id = str(uuid.uuid4())
-        engines.memory_collection.add(
+        engines.memory_collection.add(  # type: ignore[union-attr]
             documents=[text],
             ids=[doc_id],
             metadatas=[{"user_id": user_id, **(metadata or {})}],
         )
-        log.debug("Memory stored for user %s: %s", user_id, text[:60])
+        log.debug("Memory stored for user %s: %s", user_id, text[:60])  # type: ignore[misc]
     except Exception as exc:
         log.warning("Memory store failed: %s", exc)
 
@@ -2321,7 +3671,7 @@ def memory_recall(user_id: str, query: str, n_results: int = 3) -> list[str]:
     if not engines.memory_collection:
         return []
     try:
-        results = engines.memory_collection.query(
+        results = engines.memory_collection.query(  # type: ignore[union-attr]
             query_texts=[query],
             n_results=n_results,
             where={"user_id": user_id},
@@ -2340,11 +3690,54 @@ async def list_sessions():
         sid: {
             "user_id":           s.user_id,
             "tier":              s.tier,
-            "connected_seconds": round(time.time() - s.connected_at, 1),
+            "connected_seconds": round(time.time() - s.connected_at, 1),  # type: ignore[arg-type]
             "requests_this_min": s.request_count,
+            "current_emotion":   getattr(s, 'current_emotion', 'neutral'),
+            "interaction_count": getattr(s, 'interaction_count', 0),
+            "emergency_active":  getattr(s, 'emergency_active', False),
         }
         for sid, s in active_sessions.items()
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EMERGENCY RECORDING ENDPOINTS — Admin access to emergency recordings
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/emergency/recordings")
+async def list_emergency_recordings(limit: int = 50):
+    """List all emergency recordings."""
+    try:
+        from core.emergency_system import list_recordings  # type: ignore[import]
+        recordings = list_recordings(limit=limit)
+        return {"recordings": recordings, "count": len(recordings)}
+    except ImportError:
+        return {"recordings": [], "count": 0, "error": "emergency_system not available"}
+
+
+@app.get("/emergency/recordings/{recording_id}")
+async def get_emergency_recording(recording_id: str):
+    """Get a specific emergency recording's metadata."""
+    try:
+        from core.emergency_system import get_recording  # type: ignore[import]
+        recording = get_recording(recording_id)
+        if not recording:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        return recording
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Emergency system not available")
+
+
+@app.delete("/emergency/recordings/{recording_id}")
+async def delete_emergency_recording(recording_id: str):
+    """Delete an emergency recording."""
+    try:
+        from core.emergency_system import delete_recording  # type: ignore[import]
+        success = delete_recording(recording_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        return {"status": "deleted", "id": recording_id}
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Emergency system not available")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

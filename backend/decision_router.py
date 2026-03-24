@@ -54,6 +54,38 @@ AUTOMATION_PATTERNS = [
     # File/folder creation (universal)
     r"\b(create|make|new)\s+(a\s+)?(file|folder|directory|document|text\s+file|python\s+file|html\s+file)\b",
     r"\b(banao|bana\s+do|naya)\s+(file|folder)\b",  # Hindi
+    # ── Hindi/Hinglish file & folder operations ──────────────────────
+    r"\b(file|folder|directory)\s+(kholo|kholna|khole|kholke|khol\s+do)\b",
+    r"\b(kholo|khole|open\s+karo|kholke\s+dikhao)\s+.*(file|folder)\b",
+    r"\b(file|folder)\s+(banao|bana\s+do|bana\s+de|create\s+karo)\b",
+    r"\b(naya|nayi|nai|new)\s+(file|folder|document)\s*(banao|bana|bana\s+do)?\b",
+    r"\b(file|folder)\s+(delete\s+karo|delete\s+kar\s+do|hata\s+do|hatao|mita\s+do|mitao|remove\s+karo)\b",
+    r"\b(file|folder)\s+(copy\s+karo|copy\s+kar\s+do|move\s+karo|move\s+kar\s+do)\b",
+    r"\b(ye|yeh|is|isko|iss)\s+(file|folder)\s*(ko)?\s*(kholo|delete|copy|move|rename|hatao|hata)\b",
+    r"\b(rename\s+karo|naam\s+badlo|naam\s+badal\s+do)\b",
+    r"\b(dikhao|dikha\s+do|batao)\s+.*(files?|folders?|documents?)\b",
+    r"\b(save\s+karo|save\s+kar\s+do|save\s+karke|bachao|bacha\s+lo)\b",
+    r"\b(read\s+karo|padho|padh\s+ke\s+sunao|file\s+padho)\b",
+    # ── Hindi/Hinglish app control ────────────────────────────────────
+    r"\b(kholo|kholna|khole)\s+\w+\b",  # "kholo chrome", "kholo notepad"
+    r"\b\w+\s+(kholo|khole|khol\s+do)\b",  # "chrome kholo", "calculator khol do"
+    r"\b(band\s+karo|band\s+kar\s+do|close\s+karo|bund\s+karo)\s+\w*\b",
+    r"\b\w+\s+(band\s+karo|band\s+kar\s+do|close\s+karo)\b",
+    r"\b(chalu\s+karo|start\s+karo|launch\s+karo|run\s+karo|chalao)\b",
+    r"\b(app|application|software)\s+(kholo|band|install|uninstall|chalao)\b",
+    r"\b(settings|setting)\s+(kholo|dikhao|open\s+karo)\b",
+    # ── Hindi/Hinglish folder navigation ──────────────────────────────
+    r"\b(desktop|downloads?|documents?|pictures?|photos?|videos?|music)\s+(kholo|dikhao|me\s+jao|dikha\s+do|pe\s+jao)\b",
+    r"\b(desktop|downloads?|documents?)\s+(folder)?\s*(kholna|khole|me\s+le\s+jao)\b",
+    r"\b(jao|le\s+jao|chalo)\s+.*(desktop|downloads?|documents?|pictures?)\b",
+    # ── Hindi/Hinglish system control ─────────────────────────────────
+    r"\b(volume|brightness|screen|awaz)\s+(badhao|kam\s+karo|zyada|increase|decrease|badha|ghata)\b",
+    r"\b(awaz\s+band|mute\s+karo|unmute\s+karo|sound\s+band|sound\s+chalu)\b",
+    r"\b(screen\s+lock|lock\s+karo|computer\s+lock)\b",
+    r"\b(wifi\s+chalu|wifi\s+band|bluetooth\s+chalu|bluetooth\s+band)\b",
+    r"\b(screenshot\s+lo|screenshot\s+le\s+lo|screen\s+capture)\b",
+    r"\b(clipboard\s+dikhao|copy\s+kiya\s+tha|paste\s+karo)\b",
+    r"\b(search\s+karo|dhundho|dhundh|talash\s+karo|khoj)\s+.*(file|folder)?\b",
     # In-app search / compound search
     r"\b(search\s+(for\s+)?.*\s+in\s+\w+|find\s+.*\s+in\s+(store|settings|chrome|edge|browser))\b",
     r"\b(search\s+.*\s+on\s+(youtube|amazon|github|wikipedia))\b",
@@ -101,9 +133,16 @@ AUTOMATION_PATTERNS = [
     # ── Screen Reader ─────────────────────────────────────────────────
     r"\b(read.*screen|what.*on.*screen|describe.*screen|screen\s+reader)\b",
     r"\b(ocr|read\s+text|extract\s+text.*screen|screen.*padho)\b",  # Hindi
-    # ── Song Recognition ──────────────────────────────────────────
-    r"\b(what\s+song|which\s+song|identify.*song|recognize.*song|name.*song)\b",
-    r"\b(what.*playing|what.*music|shazam|konsa\s+gaana|ye\s+gaana)\b",
+    # ── Song Recognition (flexible — catches natural variations) ────
+    r"(what|which)\s+(song|music|tune)\s+(is\s+)?(this|playing|that)",
+    r"(identify|recognize|name)\s+(this\s+)?(song|music|tune)",
+    r"(song|music|tune)\s+(is\s+)?(this|playing)",
+    r"(what('s|s|\s+is)\s+(this|the)\s+(song|music|tune))",
+    r"(what.*playing|what.*listening|shazam|konsa\s+gaana|ye\s+gaana)",
+    r"(ye\s+kya\s+baj|kya\s+baj\s+raha|gaana\s+bata|song\s+bata|pehchaan)",
+    r"(what('s|s)?\s+the\s+name\s+of\s+this)",
+    r"(tell\s+me\s+the\s+song|bata\s+ye\s+gaana)",
+    r"\b(play\s+(the\s+)?(previous|last)\s+song)\b",
     # ── Context Memory ────────────────────────────────────────────────
     r"\b(remember\s+when|what\s+did\s+we\s+talk|recall.*conversation)\b",
     r"\b(past\s+conversation|yesterday.*said|what.*i.*tell\s+you)\b",
@@ -128,6 +167,40 @@ AUTOMATION_PATTERNS = [
     # ── Hindi file sharing patterns ───────────────────────────────────
     r"\b(ye\s+file|ye\s+bhejo|isko\s+bhejo|file\s+bhejo|bhejo\s+.*pe)\b",
     r"\b(desktop\s+pe|downloads?\s+me|documents?\s+me)\s+.*(file|hai)\b",
+    # ── Advanced OS Operations ───────────────────────────────────────
+    # Process management
+    r"\b(kill\s+process|end\s+task|terminate\s+process|process\s+info|process\s+details|set\s+priority|high\s+priority)\b",
+    # Network diagnostics
+    r"\b(ping\s+\w+|ping\s+test|traceroute|tracert|ip\s+address|my\s+ip|ipconfig|ip\s+config|nslookup|dns\s+lookup)\b",
+    r"\b(flush\s+dns|clear\s+dns|active\s+connections|netstat|network\s+connections|external\s+ip|public\s+ip)\b",
+    r"\b(network\s+diagnostic|network\s+test|connectivity\s+test)\b",
+    # Scheduled tasks
+    r"\b(scheduled?\s+task|cron\s+job|list\s+tasks|show\s+tasks|schedule\s+command)\b",
+    # Startup apps
+    r"\b(startup\s+app|startup\s+program|boot\s+app|auto\s+start|show\s+startup|list\s+startup|run\s+on\s+startup)\b",
+    # Disk analysis
+    r"\b(disk\s+usage|disk\s+space|drive\s+space|storage\s+space|free\s+space|how\s+much\s+space)\b",
+    r"\b(largest\s+files?|biggest\s+files?|disk\s+health|drive\s+health|smart\s+status|folder\s+size)\b",
+    # Bluetooth
+    r"\b(bluetooth\s+(on|off|toggle|enable|disable|chalu|band|status)|turn.*(bluetooth))\b",
+    # Display management
+    r"\b(screen\s+resolution|display\s+resolution|change\s+resolution|refresh\s+rate|rotate\s+screen)\b",
+    r"\b(connected\s+monitors?|monitor\s+info|display\s+info|list\s+monitors?)\b",
+    # Power plans
+    r"\b(power\s+plan|power\s+mode|high\s+performance|balanced\s+mode|power\s+saver|energy\s+mode)\b",
+    # Environment variables
+    r"\b(environment\s+variable|env\s+var|system\s+variable|path\s+variable|set\s+env)\b",
+    # Windows services
+    r"\b(windows?\s+service|start\s+service|stop\s+service|restart\s+service|list\s+services?|running\s+services?)\b",
+    # System sounds
+    r"\b(play\s+sound|system\s+sound|notification\s+sound|play\s+beep|beep\s+sound)\b",
+    # Shutdown/restart/sleep/hibernate
+    r"\b(shut\s*down|shutdown|restart\s+(computer|pc|system)|reboot|sleep\s+mode|hibernate)\b",
+    r"\b(put\s+to\s+sleep|cancel\s+shutdown|abort\s+shutdown|schedule\s+shutdown|log\s*off|sign\s+(out|off))\b",
+    r"\b(turn\s+off\s+(computer|pc|system)|switch\s+off\s+(computer|pc))\b",
+    # Hindi advanced ops
+    r"\b(bluetooth\s+chalu|bluetooth\s+band|shutdown\s+karo|restart\s+karo|sleep\s+karo)\b",
+    r"\b(disk\s+dikhao|space\s+dikhao|kitna\s+space|process\s+maro)\b",
 ]
 
 

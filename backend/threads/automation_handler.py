@@ -26,6 +26,44 @@ log = logging.getLogger("alita.automation")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECURITY HELPERS — Input sanitization for subprocess calls
+# ─────────────────────────────────────────────────────────────────────────────
+import re as _re_security
+
+# Shell metacharacters that enable command chaining / injection
+_SHELL_METACHAR_RE = _re_security.compile(r'[;&|`$(){}\[\]<>!\\\n\r]')
+
+def _sanitize_arg(value: str) -> str:
+    """Strip shell metacharacters from user input to prevent injection.
+    Allows: alphanumeric, spaces, hyphens, dots, underscores, colons, slashes, @, #, quotes."""
+    if not value:
+        return ""
+    return _SHELL_METACHAR_RE.sub('', value).strip()
+
+# Commands that must NEVER be executed via run_shell_command
+_BLOCKED_COMMANDS = [
+    "format", "del ", "rm ", "rmdir", "rd ", "erase",
+    "net user", "net localgroup", "net share",
+    "reg add", "reg delete", "regedit",
+    "powershell -enc", "powershell -e ", "iex", "invoke-expression",
+    "certutil", "bitsadmin",
+    "shutdown", "restart", "logoff",
+    "schtasks /create", "schtasks /delete",
+    "sc create", "sc delete", "sc config",
+    "wmic process call", "wmic os call",
+    "mklink", "icacls", "takeown", "cacls",
+    "bcdedit", "diskpart", "cipher /w",
+    "curl", "wget", "invoke-webrequest", "downloadstring",
+    "start-process", "new-object",
+]
+
+def _is_command_blocked(command: str) -> bool:
+    """Check if a command matches any blocked pattern."""
+    cmd_lower = command.lower().strip()
+    return any(blocked in cmd_lower for blocked in _BLOCKED_COMMANDS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BACKGROUND TASK MANAGER — Non-blocking concurrent task execution
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -78,7 +116,7 @@ class BackgroundTaskManager:
         thread.start()
         return {"status": "started", "task_id": task_id, "detail": description}
 
-    def get_status(self, task_id: str = None) -> dict:
+    def get_status(self, task_id: str | None = None) -> dict:
         """Get status of a specific task or all tasks."""
         with self._lock:
             if task_id:
@@ -117,7 +155,7 @@ class BackgroundTaskManager:
                 if t["end_time"] and (now - t["end_time"]) > 600
             ]
             for tid in to_remove:
-                del self._tasks[tid]
+                del self._tasks[tid]  # type: ignore[attr-defined]
 
 
 # Global task manager instance
@@ -139,7 +177,7 @@ def install_app(app_name: str) -> dict:
     app_lower = app_name.lower().strip()
     task_id = f"install_{app_lower.replace(' ', '_')}"
 
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows-only
 
     def _try_winget(args: list, label: str) -> dict | None:
         """Try a winget install command, return result dict or None."""
@@ -166,7 +204,7 @@ def install_app(app_name: str) -> dict:
                     "detail": f"{app_name} is already installed"
                 }
             else:
-                log.info("%s failed for '%s': %s", label, app_name, combined[:150])
+                log.info("%s failed for '%s': %s", label, app_name, combined[:150])  # type: ignore[index]
                 return None
         except subprocess.TimeoutExpired:
             log.warning("%s timed out for '%s'", label, app_name)
@@ -271,12 +309,12 @@ def uninstall_app(app_name: str) -> dict:
             result = subprocess.run(
                 ["winget", "uninstall", "--name", app_name],
                 capture_output=True, text=True, timeout=120,
-                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows-only
             )
             if result.returncode == 0 or "Successfully uninstalled" in result.stdout:
                 return {"status": "success", "action": "uninstalled", "app": app_name}
             else:
-                return {"status": "error", "error": f"Could not uninstall {app_name}: {result.stderr[:200]}"}
+                return {"status": "error", "error": f"Could not uninstall {app_name}: {result.stderr[:200]}"}  # type: ignore[index]
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -302,11 +340,13 @@ def check_task_status(task_id: str = "") -> dict:
 def create_file(path: str, content: str = "") -> dict:
     """Create a new file with optional content."""
     try:
-        path = os.path.expanduser(path)
+        path = _safe_path(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return {"status": "success", "action": "created", "path": path}
+    except PermissionError as e:
+        return {"status": "error", "error": str(e)}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -315,6 +355,8 @@ def read_file(path: str) -> dict:
     """Read a file's contents."""
     try:
         path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            path = fuzzy_find_path(path)
         with open(path, "r", encoding="utf-8") as f:
             content = f.read(10000)  # Max 10KB
         return {"status": "success", "path": path, "content": content, "size": os.path.getsize(path)}
@@ -325,11 +367,13 @@ def read_file(path: str) -> dict:
 def write_file(path: str, content: str) -> dict:
     """Write content to a file (overwrite)."""
     try:
-        path = os.path.expanduser(path)
+        path = _safe_path(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return {"status": "success", "action": "written", "path": path, "bytes": len(content)}
+    except PermissionError as e:
+        return {"status": "error", "error": str(e)}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -337,7 +381,9 @@ def write_file(path: str, content: str) -> dict:
 def delete_file(path: str) -> dict:
     """Delete a file."""
     try:
-        path = os.path.expanduser(path)
+        path = _safe_path(path)
+        if not os.path.exists(path):
+            path = fuzzy_find_path(path)
         if os.path.isfile(path):
             os.remove(path)
             return {"status": "success", "action": "deleted", "path": path}
@@ -346,6 +392,8 @@ def delete_file(path: str) -> dict:
             return {"status": "success", "action": "deleted_folder", "path": path}
         else:
             return {"status": "error", "error": f"Not found: {path}"}
+    except PermissionError as e:
+        return {"status": "error", "error": str(e)}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -357,7 +405,7 @@ def list_directory(path: str = "~") -> dict:
         if not os.path.isdir(path):
             return {"status": "error", "error": f"Not a directory: {path}"}
         items = []
-        for name in os.listdir(path)[:50]:  # Max 50 items
+        for name in os.listdir(path)[:50]:  # type: ignore[index]  # Max 50 items
             full = os.path.join(path, name)
             is_dir = os.path.isdir(full)
             size = os.path.getsize(full) if os.path.isfile(full) else 0
@@ -382,16 +430,142 @@ def create_folder(path: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_path(path: str) -> str:
-    """Expand and validate a path. Prevent access outside user home."""
+    """
+    Expand and validate a path using ALLOWLIST approach.
+    Only allows access within safe user directories.
+    Blocks system directories and sensitive config files.
+    """
+    import re as _re_safe
     expanded = os.path.abspath(os.path.expanduser(path))
     home = os.path.expanduser("~")
-    # Allow access within user home, Desktop, Documents, Downloads, etc.
-    # Block system directories like C:\Windows, C:\Program Files
-    blocked = ["windows", "program files", "programdata", "system32"]
-    path_lower = expanded.lower()
-    for b in blocked:
-        if b in path_lower and home.lower() not in path_lower:
-            raise PermissionError(f"Access to system directory blocked: {expanded}")
+    path_lower = expanded.lower().replace("/", "\\")
+    home_lower = home.lower().replace("/", "\\")
+
+    # ── ALLOWLIST: Only these directories under user home are writable ──
+    allowed_dirs = [
+        os.path.join(home_lower, d) for d in [
+            "desktop", "documents", "downloads", "pictures", "videos",
+            "music", "projects", "repos", "code", "work",
+            "onedrive", "onedrive - personal",
+        ]
+    ]
+
+    # Check if path is within an allowed directory
+    in_allowed = any(path_lower.startswith(d) for d in allowed_dirs)
+
+    if not in_allowed:
+        # ── BLOCKLIST: Even if somehow inside home, block sensitive areas ──
+        blocked_patterns = [
+            "windows", "program files", "programdata", "system32",
+            ".ssh", ".gnupg", ".aws", ".azure", ".kube",
+            ".env", ".git", ".keys", "appdata\\roaming",
+            "appdata\\local\\microsoft", "ntuser",
+        ]
+        for pattern in blocked_patterns:
+            if pattern in path_lower:
+                raise PermissionError(
+                    f"Access blocked for security: {expanded}. "
+                    f"Allowed directories: Desktop, Documents, Downloads, Pictures, Videos, Music, Projects"
+                )
+
+        # If not in allowed dirs and not in home at all → block
+        if not path_lower.startswith(home_lower):
+            raise PermissionError(
+                f"Access outside user home blocked: {expanded}. "
+                f"Allowed directories: Desktop, Documents, Downloads, Pictures, Videos, Music, Projects"
+            )
+
+    return expanded
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize a filename for fuzzy comparison: lowercase, strip separators."""
+    import re
+    return re.sub(r'[_\-\s.]+', '', name.lower())
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Simple Levenshtein distance for short strings."""
+    if len(a) < len(b):
+        return _levenshtein(b, a)
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            cost = 0 if ca == cb else 1
+            curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost))
+        prev = curr
+    return prev[len(b)]
+
+
+def fuzzy_find_path(path: str) -> str:
+    """
+    Find a file/folder even if STT mishears the name.
+    
+    Strategy:
+      1. Exact path exists → return as-is
+      2. Try with common separators: underscores, hyphens, spaces
+      3. Fuzzy match: list parent dir and find closest name by Levenshtein distance
+    
+    Examples:
+      "sarvan" → finds "sarwan" (edit distance 1)
+      "my name" → finds "my_name" (separator normalization)
+    """
+    expanded = os.path.abspath(os.path.expanduser(path))
+    
+    # 1. Exact match
+    if os.path.exists(expanded):
+        return expanded
+    
+    parent = os.path.dirname(expanded)
+    target_name = os.path.basename(expanded)
+    
+    if not os.path.isdir(parent):
+        return expanded  # Parent doesn't exist, can't search
+    
+    # 2. Try separator variants (my name → my_name, my-name)
+    target_normed = _normalize_name(target_name)
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return expanded
+    
+    # Exact normalized match (handles underscores, hyphens, spaces, dots)
+    for entry in entries:
+        if _normalize_name(entry) == target_normed:
+            found = os.path.join(parent, entry)
+            log.info("[FuzzyFind] Normalized match: '%s' → '%s'", target_name, entry)
+            return found
+    
+    # Also try stripping extension from entries for comparison
+    target_no_ext = _normalize_name(os.path.splitext(target_name)[0])
+    for entry in entries:
+        entry_no_ext = _normalize_name(os.path.splitext(entry)[0])
+        if entry_no_ext == target_no_ext:
+            found = os.path.join(parent, entry)
+            log.info("[FuzzyFind] Name-only match: '%s' → '%s'", target_name, entry)
+            return found
+    
+    # 3. Levenshtein fuzzy match (catches "sarvan" → "sarwan")
+    best_match = None
+    best_distance = 999
+    for entry in entries:
+        entry_normed = _normalize_name(os.path.splitext(entry)[0])
+        dist = _levenshtein(target_normed, entry_normed)
+        # Allow up to 2 character differences for short names, 3 for longer
+        max_dist = 2 if len(target_normed) <= 6 else 3
+        if dist < best_distance and dist <= max_dist:
+            best_distance = dist
+            best_match = entry
+    
+    if best_match:
+        found = os.path.join(parent, best_match)  # type: ignore[arg-type]
+        log.info("[FuzzyFind] Fuzzy match (dist=%d): '%s' → '%s'", best_distance, target_name, best_match)
+        return found
+    
+    # No fuzzy match found — return original
     return expanded
 
 
@@ -400,6 +574,10 @@ def copy_item(source: str, destination: str) -> dict:
     try:
         src = _safe_path(source)
         dst = _safe_path(destination)
+
+        # Fuzzy match source if not found exactly (handles STT mishearings)
+        if not os.path.exists(src):
+            src = fuzzy_find_path(src)
 
         if not os.path.exists(src):
             return {"status": "error", "error": f"Source not found: {src}"}
@@ -432,6 +610,10 @@ def move_item(source: str, destination: str) -> dict:
         src = _safe_path(source)
         dst = _safe_path(destination)
 
+        # Fuzzy match source if not found exactly (handles STT mishearings)
+        if not os.path.exists(src):
+            src = fuzzy_find_path(src)
+
         if not os.path.exists(src):
             return {"status": "error", "error": f"Source not found: {src}"}
 
@@ -451,16 +633,16 @@ def move_item(source: str, destination: str) -> dict:
 def copy_text_to_clipboard(text: str) -> dict:
     """Copy text to the system clipboard."""
     try:
-        import pyperclip
+        import pyperclip  # type: ignore[import]
         pyperclip.copy(text)
         _track_clipboard(text)  # Track in clipboard history
         return {"status": "success", "action": "copied_to_clipboard",
-                "chars": len(text), "preview": text[:80]}
+                "chars": len(text), "preview": text[:80]}  # type: ignore[index]
     except ImportError:
         # Fallback for Windows
         try:
             process = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
-            process.communicate(text.encode("utf-8"))
+            process.communicate(text.encode("utf-8"))  # type: ignore[arg-type]
             return {"status": "success", "action": "copied_to_clipboard",
                     "chars": len(text)}
         except Exception as e:
@@ -569,12 +751,12 @@ def _find_exe_path(exe_name: str) -> str | None:
         import winreg
         for exe_try in [exe_name, f"{exe_name}.exe"]:
             try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE,
+                key = winreg.OpenKey(  # type: ignore[attr-defined]
+                    winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
                     rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_try}"
                 )
-                val, _ = winreg.QueryValueEx(key, None)
-                winreg.CloseKey(key)
+                val, _ = winreg.QueryValueEx(key, None)  # type: ignore[attr-defined]
+                winreg.CloseKey(key)  # type: ignore[attr-defined]
                 if val and os.path.exists(val.strip('"')):
                     return val.strip('"')
             except (FileNotFoundError, OSError):
@@ -624,7 +806,7 @@ def _build_start_menu_cache() -> dict[str, str]:
         for root, dirs, files in os.walk(base_dir):
             for fname in files:
                 if fname.lower().endswith(".lnk"):
-                    name = fname[:-4].lower()  # strip .lnk
+                    name = fname[:-4].lower()  # type: ignore[index]  # strip .lnk
                     full_path = os.path.join(root, fname)
                     cache[name] = full_path
 
@@ -678,24 +860,29 @@ def _find_uwp_app(app_name: str) -> str | None:
     """
     Search for a UWP/Store app and return its launch URI.
     Uses PowerShell Get-AppxPackage (fast, ~200ms).
+    SECURITY: app_name is sanitized to prevent command injection.
     """
     if platform.system() != "Windows":
         return None
 
     try:
-        # Search installed UWP apps by name
-        ps_cmd = (
-            f'powershell -NoProfile -Command "'
-            f"Get-AppxPackage -Name '*{app_name}*' "
+        import re as _re_uwp
+        # Sanitize app_name — allow only alphanumeric, spaces, hyphens, dots
+        sanitized = _re_uwp.sub(r'[^a-zA-Z0-9\s.\-]', '', app_name).strip()
+        if not sanitized:
+            return None
+
+        # Use argument list (no shell=True) to prevent injection
+        ps_script = (
+            f"Get-AppxPackage -Name '*{sanitized}*' "
             f"| Select-Object -First 1 -ExpandProperty PackageFamilyName"
-            f'"'
         )
         result = subprocess.run(
-            ps_cmd, shell=True, capture_output=True, text=True, timeout=3
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=3
         )
         family_name = result.stdout.strip()
         if family_name and not family_name.startswith("Get-AppxPackage"):
-            # Get the app's launch URI via shell:AppsFolder
             return f"shell:AppsFolder\\{family_name}!App"
     except (subprocess.TimeoutExpired, Exception):
         pass
@@ -725,15 +912,15 @@ def open_app(app_name: str) -> dict:
             store_query = app_name  # Keep original case for store search
 
         # ── Method 1: Protocol URIs (ms-settings:, bingmaps:, whatsapp:) ──
-        if exe.startswith("ms-") or exe.endswith(":"):
+        if exe.startswith("ms-") or exe.endswith(":"):  # type: ignore[union-attr]
             try:
-                subprocess.Popen(["start", "", exe], shell=True)
+                subprocess.Popen(["start", "", exe], shell=True)  # type: ignore[list-item]
                 return {"status": "success", "action": "opened", "app": app_name}
             except Exception:
                 pass
 
         # ── Method 2: Direct exe path via registry/PATH ──
-        full_path = _find_exe_path(exe)
+        full_path = _find_exe_path(exe)  # type: ignore[arg-type]
         if full_path:
             try:
                 subprocess.Popen([full_path])
@@ -746,7 +933,7 @@ def open_app(app_name: str) -> dict:
         lnk_path = _search_start_menu(app_lower)
         if lnk_path:
             try:
-                os.startfile(lnk_path)
+                os.startfile(lnk_path)  # type: ignore[attr-defined]
                 return {"status": "success", "action": "opened", "app": app_name}
             except Exception:
                 pass
@@ -776,7 +963,7 @@ def open_app(app_name: str) -> dict:
         # ── Method 6: Try the original app name as startfile ──
         # Works for some apps registered with Windows
         try:
-            os.startfile(app_name)
+            os.startfile(app_name)  # type: ignore[attr-defined]
             return {"status": "success", "action": "opened", "app": app_name}
         except (FileNotFoundError, OSError):
             pass
@@ -795,6 +982,83 @@ def open_app(app_name: str) -> dict:
 
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP-READY DETECTION — polls foreground window instead of blind sleep()
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Map app names to keywords that may appear in their window titles
+_APP_WINDOW_KEYWORDS = {
+    "whatsapp":   ["whatsapp"],
+    "telegram":   ["telegram"],
+    "discord":    ["discord"],
+    "chrome":     ["chrome", "google chrome"],
+    "firefox":    ["firefox", "mozilla"],
+    "edge":       ["edge"],
+    "brave":      ["brave"],
+    "spotify":    ["spotify"],
+    "notepad":    ["notepad"],
+    "vscode":     ["visual studio code"],
+    "vs code":    ["visual studio code"],
+    "word":       ["word", "document"],
+    "excel":      ["excel"],
+    "powerpoint": ["powerpoint"],
+    "outlook":    ["outlook"],
+    "teams":      ["teams"],
+    "slack":      ["slack"],
+    "explorer":   ["file explorer", "explorer"],
+    "file explorer": ["file explorer", "explorer"],
+}
+
+
+def _wait_for_app_window(app_name: str, timeout: float = 30.0) -> bool:
+    """
+    Poll the foreground window title until the target app is focused.
+    
+    Instead of blind sleep(3), this adapts to any app launch time:
+    - Polls every 300ms (very lightweight)
+    - Returns True as soon as the app window is detected
+    - Returns False only after the full timeout (default 30s)
+    
+    Works whether the app opens in 0.5s or 60s.
+    """
+    import time as _t
+
+    app_lower = app_name.lower().strip()
+
+    # Build keyword list for matching
+    keywords = _APP_WINDOW_KEYWORDS.get(app_lower, [app_lower])
+    # Also add the raw app name and common variants
+    extra = [app_lower, app_lower.replace(" ", "")]
+    keywords = list(set(keywords + extra))
+
+    log.info("[wait_for_app] Waiting for '%s' window (keywords: %s, timeout: %ss)",
+             app_name, keywords, timeout)
+
+    start = _t.monotonic()
+    poll_interval = 0.3  # 300ms between checks
+
+    while (_t.monotonic() - start) < timeout:
+        try:
+            fg = _get_foreground_window_info()
+            title = fg.get("title", "").lower()
+
+            if title and any(kw in title for kw in keywords):
+                elapsed = round(_t.monotonic() - start, 1)  # type: ignore[call-overload]
+                log.info("[wait_for_app] '%s' window detected in %ss (title: '%s')",
+                         app_name, elapsed, fg.get("title", ""))
+                # Small extra delay for the app UI to finish rendering
+                _t.sleep(0.5)
+                return True
+        except Exception:
+            pass
+
+        _t.sleep(poll_interval)
+
+    elapsed = round(_t.monotonic() - start, 1)  # type: ignore[call-overload]
+    log.warning("[wait_for_app] Timeout after %ss waiting for '%s'", elapsed, app_name)
+    return False
 
 
 # Well-known folder aliases → actual paths
@@ -819,6 +1083,10 @@ def open_folder(folder: str) -> dict:
     """
     Open a folder in File Explorer.
     Resolves well-known aliases like 'downloads', 'desktop', etc.
+    If an Explorer window is already open, navigates it to the target folder
+    instead of opening a new window/tab.
+    Also resolves relative folder names (e.g. "price") by checking them as
+    subfolders of the current Explorer location.
     """
     try:
         folder_lower = folder.lower().strip()
@@ -836,19 +1104,184 @@ def open_folder(folder: str) -> dict:
             subprocess.Popen(["explorer", path])
             return {"status": "success", "action": "opened_folder", "path": path}
 
+        # 3. If path doesn't exist, try resolving as a subfolder
         if not os.path.isdir(path):
-            return {"status": "error",
-                    "error": f"Folder not found: {path}"}
+            resolved = _resolve_relative_folder(folder)
+            if resolved:
+                path = resolved
+            else:
+                return {"status": "error",
+                        "error": f"Folder not found: {path}"}
 
-        # Open in File Explorer (Windows)
+        # ── Windows: try to reuse an existing Explorer window ──
         if platform.system() == "Windows":
-            os.startfile(path)
+            navigated = _navigate_existing_explorer(path)
+            if navigated:
+                return {"status": "success", "action": "opened_folder",
+                        "path": path, "detail": "Navigated existing Explorer window"}
+
+            # No Explorer window open — open a new one
+            subprocess.Popen(["explorer", path])
         else:
             subprocess.Popen(["xdg-open", path])
 
         return {"status": "success", "action": "opened_folder", "path": path}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+def _resolve_relative_folder(folder_name: str) -> str:
+    """
+    Try to resolve a relative folder name (e.g. "price", "projects")
+    by checking:
+      1. As a subfolder of the currently-open Explorer window path
+      2. As a subfolder of common user directories (Downloads, Desktop, etc.)
+    Returns the full path if found, empty string otherwise.
+    """
+    name = folder_name.strip()
+    if not name:
+        return ""
+
+    # ── 1. Check relative to the current Explorer path ──
+    if platform.system() == "Windows":
+        current = _get_current_explorer_path()
+        if current:
+            candidate = os.path.join(current, name)
+            if os.path.isdir(candidate):
+                log.info("[open_folder] Resolved '%s' as subfolder of '%s'", name, current)
+                return candidate
+
+    # ── 2. Check in common user directories ──
+    home = os.path.expanduser("~")
+    search_dirs = ["Downloads", "Desktop", "Documents", "Pictures", "Videos", "Music"]
+    for d in search_dirs:
+        candidate = os.path.join(home, d, name)
+        if os.path.isdir(candidate):
+            log.info("[open_folder] Resolved '%s' in ~/%s", name, d)
+            return candidate
+
+    # ── 3. Case-insensitive search in common directories ──
+    name_lower = name.lower()
+    for d in search_dirs:
+        parent = os.path.join(home, d)
+        if os.path.isdir(parent):
+            try:
+                for entry in os.listdir(parent):
+                    if entry.lower() == name_lower and os.path.isdir(os.path.join(parent, entry)):
+                        full = os.path.join(parent, entry)
+                        log.info("[open_folder] Resolved '%s' (case-insensitive) in ~/%s", name, d)
+                        return full
+            except OSError:
+                continue
+
+    return ""
+
+
+def _navigate_existing_explorer(target_path: str) -> bool:
+    """
+    Find an existing File Explorer window and navigate it to target_path.
+    
+    Uses ctypes to find Explorer windows (by class "CabinetWClass") and
+    Ctrl+L address bar navigation — the most reliable approach.
+    No COM dependency, works consistently on every call.
+    """
+    import ctypes
+    import ctypes.wintypes
+    import time as _t
+
+    try:
+        import pyautogui  # type: ignore[import]
+        import pyperclip  # type: ignore[import]
+    except ImportError:
+        log.debug("[open_folder] pyautogui/pyperclip not available for navigation")
+        return False
+
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    explorer_hwnd = None
+
+    # ── Find an Explorer window by its window class ──
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)  # type: ignore[attr-defined]
+    def _enum_callback(hwnd, _lParam):
+        nonlocal explorer_hwnd
+        if user32.IsWindowVisible(hwnd):
+            class_buff = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, class_buff, 256)
+            # File Explorer windows have class "CabinetWClass"
+            if class_buff.value == "CabinetWClass":
+                explorer_hwnd = hwnd
+                return False  # Stop enumeration — found one
+        return True
+
+    try:
+        user32.EnumWindows(_enum_callback, 0)
+    except Exception:
+        pass
+
+    if not explorer_hwnd:
+        return False
+
+    # ── Bring Explorer to foreground ──
+    try:
+        user32.SetForegroundWindow(explorer_hwnd)
+    except Exception:
+        pass
+    _t.sleep(0.3)
+
+    # ── Navigate using address bar: Ctrl+L → paste path → Enter ──
+    pyautogui.hotkey("ctrl", "l")
+    _t.sleep(0.3)
+    pyperclip.copy(target_path)
+    pyautogui.hotkey("ctrl", "v")
+    _t.sleep(0.2)
+    pyautogui.press("enter")
+    _t.sleep(0.5)
+
+    log.info("[open_folder] Navigated existing Explorer to: %s", target_path)
+    return True
+
+
+def _get_current_explorer_path() -> str:
+    """
+    Get the current folder path of the focused Explorer window.
+    Uses Ctrl+L to focus the address bar, Ctrl+C to copy, then reads clipboard.
+    Returns the path or empty string if not available.
+    """
+    import time as _t
+    try:
+        import pyautogui  # type: ignore[import]
+        import pyperclip  # type: ignore[import]
+
+        # Save current clipboard
+        old_clip = ""
+        try:
+            old_clip = pyperclip.paste()
+        except Exception:
+            pass
+
+        # Focus address bar and copy path
+        pyautogui.hotkey("ctrl", "l")
+        _t.sleep(0.2)
+        pyautogui.hotkey("ctrl", "c")
+        _t.sleep(0.2)
+
+        current = pyperclip.paste().strip()
+
+        # Press Escape to deselect the address bar
+        pyautogui.press("escape")
+        _t.sleep(0.1)
+
+        # Restore old clipboard
+        try:
+            pyperclip.copy(old_clip)
+        except Exception:
+            pass
+
+        # Validate: must look like a real path
+        if current and os.path.isdir(current):
+            return current
+        return ""
+    except Exception:
+        return ""
 
 
 def close_app(app_name: str) -> dict:
@@ -862,7 +1295,7 @@ def close_app(app_name: str) -> dict:
             subprocess.run(["taskkill", "/IM", f"{exe}.exe", "/F"],
                           capture_output=True, timeout=5)
         else:
-            subprocess.run(["pkill", "-f", exe], capture_output=True, timeout=5)
+            subprocess.run(["pkill", "-f", exe], capture_output=True, timeout=5)  # type: ignore[call-overload]
 
         return {"status": "success", "action": "closed", "app": app_name}
     except Exception as e:
@@ -889,7 +1322,7 @@ def send_keys(keys: str) -> dict:
     Universal — works in ANY app.
     """
     try:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         import time as _time
         pyautogui.PAUSE = 0.05
 
@@ -936,7 +1369,7 @@ def send_keys(keys: str) -> dict:
 def click_position(x: int, y: int, button: str = "left") -> dict:
     """Click at a specific screen position."""
     try:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         pyautogui.click(x, y, button=button)
         return {"status": "success", "action": "click",
                 "detail": f"Clicked {button} at ({x}, {y})"}
@@ -985,7 +1418,7 @@ def search_in_app(app_name: str, query: str) -> dict:
     with a universal fallback.
     """
     try:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         import time as _time
 
         app_lower = app_name.lower().strip()
@@ -1040,12 +1473,12 @@ def search_in_app(app_name: str, query: str) -> dict:
 def _type_unicode(text: str):
     """Type unicode text using clipboard (for non-ASCII chars like Hindi)."""
     try:
-        import pyperclip
-        import pyautogui
+        import pyperclip  # type: ignore[import]
+        import pyautogui  # type: ignore[import]
         pyperclip.copy(text)
         pyautogui.hotkey("ctrl", "v")
     except ImportError:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         pyautogui.typewrite(text, interval=0.02)
 
 
@@ -1092,7 +1525,7 @@ def search_windows(query: str) -> dict:
     Finds apps, files, settings, etc. through Windows Search.
     """
     try:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         import time as _time
 
         # Press Windows key to open Start Menu search
@@ -1124,7 +1557,7 @@ def search_windows(query: str) -> dict:
 def get_system_info() -> dict:
     """Get basic system information."""
     try:
-        import psutil
+        import psutil  # type: ignore[import]
         info = {
             "os": platform.system() + " " + platform.release(),
             "hostname": platform.node(),
@@ -1144,7 +1577,7 @@ def get_system_info() -> dict:
 def get_battery() -> dict:
     """Get battery status."""
     try:
-        import psutil
+        import psutil  # type: ignore[import]
         battery = psutil.sensors_battery()
         if battery:
             return {
@@ -1163,7 +1596,7 @@ def get_battery() -> dict:
 def get_running_processes(limit: int = 15) -> dict:
     """List top running processes by memory usage."""
     try:
-        import psutil
+        import psutil  # type: ignore[import]
         procs = []
         for p in psutil.process_iter(["pid", "name", "memory_percent"]):
             try:
@@ -1171,7 +1604,7 @@ def get_running_processes(limit: int = 15) -> dict:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         procs.sort(key=lambda x: x.get("memory_percent", 0), reverse=True)
-        return {"status": "success", "count": len(procs), "top": procs[:limit]}
+        return {"status": "success", "count": len(procs), "top": procs[:limit]}  # type: ignore[index]
     except ImportError:
         return {"status": "error", "error": "psutil not installed"}
     except Exception as e:
@@ -1179,28 +1612,40 @@ def get_running_processes(limit: int = 15) -> dict:
 
 
 def run_shell_command(command: str) -> dict:
-    """Run a shell command and return output."""
+    """Run a shell command and return output.
+    SECURITY: Blocks dangerous commands and sanitizes input.
+    """
     try:
+        # ── Block dangerous commands ──────────────────────────────────
+        if _is_command_blocked(command):
+            log.warning("[SECURITY] Blocked dangerous command: %s", command[:80])
+            return {"status": "error", "error": "This command is not allowed for security reasons."}
+
+        # ── Sanitize: remove injection metacharacters ─────────────────
+        sanitized = _sanitize_arg(command)
+        if not sanitized:
+            return {"status": "error", "error": "Invalid command."}
+
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=15
+            sanitized, shell=True, capture_output=True, text=True, timeout=15
         )
         return {
             "status": "success",
-            "command": command,
-            "stdout": result.stdout[:2000],
-            "stderr": result.stderr[:500] if result.stderr else "",
+            "command": sanitized,
+            "stdout": result.stdout[:2000],  # type: ignore[index]
+            "stderr": result.stderr[:500] if result.stderr else "",  # type: ignore[index]
             "exit_code": result.returncode,
         }
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": "Command timed out (15s limit)"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+    except Exception:
+        return {"status": "error", "error": "Command execution failed."}
 
 
 def take_screenshot(save_path: str = "") -> dict:
     """Take a screenshot and save it."""
     try:
-        from PIL import ImageGrab
+        from PIL import ImageGrab  # type: ignore[import]
         if not save_path:
             save_path = os.path.expanduser("~/Desktop/screenshot.png")
         img = ImageGrab.grab()
@@ -1232,12 +1677,12 @@ def type_in_app(app_name: str, content: str) -> dict:
         # 3. If content is provided, type it now
         if content.strip():
             try:
-                import pyautogui
+                import pyautogui  # type: ignore[import]
                 pyautogui.PAUSE = 0.05
                 if content.isascii():
                     pyautogui.typewrite(content, interval=0.02)
                 else:
-                    import pyperclip
+                    import pyperclip  # type: ignore[import]
                     pyperclip.copy(content)
                     pyautogui.hotkey("ctrl", "v")
                 return {
@@ -1373,7 +1818,7 @@ def lock_screen() -> dict:
     """Lock the computer screen."""
     try:
         import ctypes
-        ctypes.windll.user32.LockWorkStation()
+        ctypes.windll.user32.LockWorkStation()  # type: ignore[attr-defined]
         return {"status": "success", "action": "lock_screen", "detail": "Screen locked"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -1385,7 +1830,7 @@ def empty_recycle_bin() -> dict:
         import ctypes
         # SHEmptyRecycleBin(hwnd, path, flags)
         # SHERB_NOCONFIRMATION = 0x00000001 | SHERB_NOPROGRESSUI = 0x00000002 | SHERB_NOSOUND = 0x00000004
-        ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x0007)
+        ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x0007)  # type: ignore[attr-defined]
         return {"status": "success", "action": "empty_recycle_bin", "detail": "Recycle bin emptied"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -1411,9 +1856,1023 @@ def toggle_wifi(action: str = "toggle") -> dict:
             else:
                 cmd = 'netsh interface set interface "Wi-Fi" admin=enable'
                 act = "on"
-        subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
+        subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", f"admin={('disable' if act == 'off' else 'enable')}"],
+                       capture_output=True, timeout=10)
         return {"status": "success", "action": "toggle_wifi",
                 "detail": f"WiFi turned {act}"}
+    except Exception:
+        return {"status": "error", "error": "Failed to toggle WiFi."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADVANCED OS OPERATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def manage_process(name: str, action: str = "info") -> dict:
+    """
+    Advanced process management.
+    Actions: info, kill, priority_high, priority_normal, priority_low
+    """
+    try:
+        import psutil  # type: ignore[import]
+        act = action.lower().strip()
+        name_lower = name.lower().strip()
+
+        # Find matching processes
+        matched = []
+        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent",
+                                       "status", "create_time", "cmdline"]):
+            try:
+                pname = (p.info.get("name") or "").lower()
+                if name_lower in pname or pname.startswith(name_lower):
+                    matched.append(p)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        if not matched:
+            return {"status": "error", "error": f"No process found matching '{name}'"}
+
+        if act == "kill":
+            killed = 0
+            for p in matched:
+                try:
+                    p.kill()
+                    killed += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    log.warning("Could not kill PID %d: %s", p.pid, e)
+            return {"status": "success", "action": "kill_process",
+                    "detail": f"Killed {killed} process(es) matching '{name}'",
+                    "count": killed}
+
+        elif act.startswith("priority"):
+            import ctypes
+            PRIORITY_MAP = {
+                "priority_high": 0x00000080,       # HIGH_PRIORITY_CLASS
+                "priority_normal": 0x00000020,      # NORMAL_PRIORITY_CLASS
+                "priority_low": 0x00004000,         # BELOW_NORMAL_PRIORITY_CLASS
+                "priority_realtime": 0x00000100,    # REALTIME_PRIORITY_CLASS
+            }
+            prio = PRIORITY_MAP.get(act, 0x00000020)
+            prio_name = act.replace("priority_", "")
+            changed = 0
+            for p in matched:
+                try:
+                    handle = ctypes.windll.kernel32.OpenProcess(0x0200, False, p.pid)  # type: ignore[attr-defined]
+                    if handle:
+                        ctypes.windll.kernel32.SetPriorityClass(handle, prio)  # type: ignore[attr-defined]
+                        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+                        changed += 1
+                except Exception:
+                    continue
+            return {"status": "success", "action": "set_priority",
+                    "detail": f"Set {changed} process(es) '{name}' to {prio_name} priority",
+                    "priority": prio_name}
+
+        else:  # info
+            info_list = []
+            for p in matched[:10]:  # type: ignore[index]
+                try:
+                    with p.oneshot():
+                        info_list.append({
+                            "pid": p.pid,
+                            "name": p.info.get("name", "?"),
+                            "cpu_percent": round(p.cpu_percent(interval=0.1), 1),
+                            "memory_mb": round(p.memory_info().rss / (1024 * 1024), 1),
+                            "memory_percent": round(p.memory_percent(), 1),
+                            "status": p.status(),
+                            "cmdline": " ".join(p.cmdline()[:3]) if p.cmdline() else "",  # type: ignore[index]
+                        })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return {"status": "success", "action": "process_info",
+                    "process": name, "count": len(info_list),
+                    "processes": info_list}
+
+    except ImportError:
+        return {"status": "error", "error": "psutil not installed. Run: pip install psutil"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def network_diagnostics(action: str = "ip_config", target: str = "") -> dict:
+    """
+    Network diagnostics: ping, ip_config, traceroute, dns_lookup,
+    active_connections, flush_dns, speed_test_info, external_ip.
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+
+        if act == "ping":
+            host = target or "google.com"
+            result = subprocess.run(
+                ["ping", "-n", "4", host],
+                capture_output=True, text=True, timeout=15,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "ping",
+                    "host": host,
+                    "output": result.stdout[:1500],
+                    "detail": f"Pinged {host}"}
+
+        elif act == "traceroute":
+            host = target or "google.com"
+            result = subprocess.run(
+                ["tracert", "-d", "-h", "15", host],
+                capture_output=True, text=True, timeout=30,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "traceroute",
+                    "host": host,
+                    "output": result.stdout[:2000],
+                    "detail": f"Traceroute to {host}"}
+
+        elif act == "dns_lookup":
+            host = target or "google.com"
+            result = subprocess.run(
+                ["nslookup", host],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "dns_lookup",
+                    "host": host,
+                    "output": result.stdout[:1000],
+                    "detail": f"DNS lookup for {host}"}
+
+        elif act == "active_connections":
+            result = subprocess.run(
+                ["netstat", "-an"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            lines = result.stdout.strip().split("\n")
+            # Count connection states
+            states = {}
+            for line in lines:
+                for state in ["ESTABLISHED", "LISTENING", "TIME_WAIT", "CLOSE_WAIT", "SYN_SENT"]:
+                    if state in line:
+                        states[state] = states.get(state, 0) + 1
+            return {"status": "success", "action": "active_connections",
+                    "total_lines": len(lines),
+                    "connection_states": states,
+                    "sample": "\n".join(lines[:30]),
+                    "detail": f"Active connections: {sum(states.values())} total"}
+
+        elif act == "flush_dns":
+            result = subprocess.run(
+                ["ipconfig", "/flushdns"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "flush_dns",
+                    "output": result.stdout.strip(),
+                    "detail": "DNS cache flushed"}
+
+        elif act == "external_ip":
+            try:
+                import urllib.request
+                ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
+                return {"status": "success", "action": "external_ip",
+                        "external_ip": ip,
+                        "detail": f"External IP: {ip}"}
+            except Exception as e:
+                return {"status": "error", "error": f"Could not fetch external IP: {e}"}
+
+        else:  # ip_config (default)
+            result = subprocess.run(
+                ["ipconfig", "/all"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            # Also try to get external IP
+            ext_ip = ""
+            try:
+                import urllib.request
+                ext_ip = urllib.request.urlopen("https://api.ipify.org", timeout=3).read().decode()
+            except Exception:
+                pass
+            return {"status": "success", "action": "ip_config",
+                    "output": result.stdout[:2000],
+                    "external_ip": ext_ip,
+                    "detail": f"IP config retrieved{f' — External IP: {ext_ip}' if ext_ip else ''}"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Network command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_scheduled_task(action: str = "list", name: str = "",
+                          command: str = "", schedule: str = "") -> dict:
+    """
+    Manage Windows scheduled tasks via schtasks.exe.
+    Actions: list, create, delete, run, status.
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+        import re as _re_sched
+        # Sanitize name — allow only safe characters
+        safe_name = _re_sched.sub(r'[^a-zA-Z0-9_\-\s]', '', name).strip() if name else ""
+
+        if act == "list":
+            result = subprocess.run(
+                ["schtasks", "/Query", "/FO", "LIST", "/V"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            # Parse and summarize (full output is huge)
+            lines = result.stdout.split("\n")
+            tasks = []
+            current = {}
+            for line in lines:
+                line = line.strip()
+                if line.startswith("TaskName:"):
+                    if current and current.get("name"):
+                        tasks.append(current)
+                    current = {"name": line.split(":", 1)[1].strip()}
+                elif line.startswith("Status:"):
+                    current["status"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Next Run Time:"):
+                    current["next_run"] = line.split(":", 1)[1].strip()
+            if current and current.get("name"):
+                tasks.append(current)
+            # Filter to user-created tasks (skip Microsoft\ system tasks)
+            user_tasks = [t for t in tasks if not t.get("name", "").startswith("\\Microsoft")]
+            return {"status": "success", "action": "list_scheduled_tasks",
+                    "total": len(tasks), "user_tasks_count": len(user_tasks),
+                    "user_tasks": user_tasks[:20],
+                    "detail": f"Found {len(user_tasks)} user-created scheduled tasks"}
+
+        elif act == "create":
+            if not safe_name or not command:
+                return {"status": "error",
+                        "error": "Need both 'name' and 'command' to create a scheduled task"}
+            # Parse schedule: "daily", "hourly", "weekly", "once", "minute"
+            sched_lower = schedule.lower().strip() if schedule else "daily"
+            SCHED_MAP = {
+                "daily": "/SC DAILY /ST 09:00",
+                "hourly": "/SC HOURLY",
+                "weekly": "/SC WEEKLY /D MON /ST 09:00",
+                "minute": "/SC MINUTE /MO 30",
+                "once": "/SC ONCE /ST 12:00 /SD " + __import__("datetime").date.today().strftime("%m/%d/%Y"),
+                "onlogon": "/SC ONLOGON",
+                "onidle": "/SC ONIDLE /I 10",
+            }
+            # Try to extract time from schedule string (e.g. "daily at 3pm", "every day at 15:00")
+            sched_args = SCHED_MAP.get(sched_lower, "/SC DAILY /ST 09:00")
+            import re as _re_time
+            time_match = _re_time.search(r"(\d{1,2}):?(\d{2})?\s*(am|pm)?", schedule.lower() if schedule else "")
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2) or 0)
+                ampm = time_match.group(3)
+                if ampm == "pm" and hour < 12:
+                    hour += 12
+                elif ampm == "am" and hour == 12:
+                    hour = 0
+                time_str = f"{hour:02d}:{minute:02d}"
+                sched_args = _re_time.sub(r"/ST \S+", f"/ST {time_str}", sched_args)
+                if "/ST" not in sched_args:
+                    sched_args += f" /ST {time_str}"
+
+            cmd_str = f'schtasks /Create /TN "{safe_name}" /TR "{command}" {sched_args} /F'
+            result = subprocess.run(
+                cmd_str, shell=True, capture_output=True, text=True, timeout=15,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0 or "SUCCESS" in result.stdout.upper():
+                return {"status": "success", "action": "create_scheduled_task",
+                        "name": safe_name, "command": command,
+                        "schedule": sched_args,
+                        "detail": f"Created scheduled task '{safe_name}'"}
+            return {"status": "error",
+                    "error": f"Failed to create task: {result.stderr[:200] or result.stdout[:200]}"}
+
+        elif act == "delete":
+            if not safe_name:
+                return {"status": "error", "error": "Need 'name' to delete a scheduled task"}
+            result = subprocess.run(
+                ["schtasks", "/Delete", "/TN", safe_name, "/F"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0 or "SUCCESS" in result.stdout.upper():
+                return {"status": "success", "action": "delete_scheduled_task",
+                        "name": safe_name,
+                        "detail": f"Deleted scheduled task '{safe_name}'"}
+            return {"status": "error",
+                    "error": f"Failed to delete task: {result.stderr[:200]}"}
+
+        elif act == "run":
+            if not safe_name:
+                return {"status": "error", "error": "Need 'name' to run a scheduled task"}
+            result = subprocess.run(
+                ["schtasks", "/Run", "/TN", safe_name],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                return {"status": "success", "action": "run_scheduled_task",
+                        "name": safe_name,
+                        "detail": f"Manually triggered task '{safe_name}'"}
+            return {"status": "error",
+                    "error": f"Failed to run task: {result.stderr[:200]}"}
+
+        else:
+            return {"status": "error", "error": f"Unknown scheduled task action: {action}"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Scheduled task command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_startup_apps(action: str = "list", app_name: str = "",
+                        app_path: str = "") -> dict:
+    """
+    Manage Windows startup programs via registry (HKCU\\...\\Run).
+    Actions: list, add, remove.
+    """
+    REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        import winreg  # type: ignore[import]
+        act = action.lower().strip()
+
+        if act == "list":
+            apps = []
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_READ)  # type: ignore[attr-defined]
+                i = 0
+                while True:
+                    try:
+                        name, value, _ = winreg.EnumValue(key, i)  # type: ignore[attr-defined]
+                        apps.append({"name": name, "path": value})
+                        i += 1
+                    except OSError:
+                        break
+                winreg.CloseKey(key)  # type: ignore[attr-defined]
+            except FileNotFoundError:
+                pass
+            return {"status": "success", "action": "list_startup_apps",
+                    "count": len(apps), "apps": apps,
+                    "detail": f"Found {len(apps)} startup applications"}
+
+        elif act == "add":
+            if not app_name or not app_path:
+                return {"status": "error",
+                        "error": "Need both 'app_name' and 'app_path' to add a startup app"}
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)  # type: ignore[attr-defined]
+            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, app_path)  # type: ignore[attr-defined]
+            winreg.CloseKey(key)  # type: ignore[attr-defined]
+            return {"status": "success", "action": "add_startup_app",
+                    "name": app_name, "path": app_path,
+                    "detail": f"Added '{app_name}' to startup programs"}
+
+        elif act == "remove":
+            if not app_name:
+                return {"status": "error",
+                        "error": "Need 'app_name' to remove a startup app"}
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)  # type: ignore[attr-defined]
+                winreg.DeleteValue(key, app_name)  # type: ignore[attr-defined]
+                winreg.CloseKey(key)  # type: ignore[attr-defined]
+                return {"status": "success", "action": "remove_startup_app",
+                        "name": app_name,
+                        "detail": f"Removed '{app_name}' from startup programs"}
+            except FileNotFoundError:
+                return {"status": "error",
+                        "error": f"'{app_name}' not found in startup programs"}
+
+        else:
+            return {"status": "error", "error": f"Unknown startup action: {action}"}
+
+    except ImportError:
+        return {"status": "error", "error": "winreg is only available on Windows"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def analyze_disk(action: str = "usage", path: str = "") -> dict:
+    """
+    Disk analysis: usage (by drive), largest_files, health (SMART).
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+
+        if act == "largest_files":
+            search_path = os.path.expanduser(path or "~/Desktop")
+            if not os.path.isdir(search_path):
+                return {"status": "error", "error": f"Not a directory: {search_path}"}
+            files = []
+            for root, dirs, filenames in os.walk(search_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]  # type: ignore[index]
+                depth = root.replace(search_path, '').count(os.sep)
+                if depth > 4:
+                    dirs.clear()
+                    continue
+                for fname in filenames:
+                    fpath = os.path.join(root, fname)
+                    try:
+                        size = os.path.getsize(fpath)
+                        files.append({"name": fname, "path": fpath, "size_mb": round(size / (1024 * 1024), 2)})
+                    except OSError:
+                        continue
+            files.sort(key=lambda x: x["size_mb"], reverse=True)
+            top = files[:15]  # type: ignore[index]
+            return {"status": "success", "action": "largest_files",
+                    "path": search_path, "count": len(top),
+                    "files": top,
+                    "detail": f"Top {len(top)} largest files in {search_path}"}
+
+        elif act == "health":
+            result = subprocess.run(
+                ["wmic", "diskdrive", "get", "Status,Model,Size,InterfaceType"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "disk_health",
+                    "output": result.stdout.strip(),
+                    "detail": "Disk health (SMART) status retrieved"}
+
+        else:  # usage (default)
+            try:
+                import psutil  # type: ignore[import]
+                partitions = psutil.disk_partitions()
+                drives = []
+                for part in partitions:
+                    try:
+                        usage = psutil.disk_usage(part.mountpoint)
+                        drives.append({
+                            "drive": part.device,
+                            "mountpoint": part.mountpoint,
+                            "fs_type": part.fstype,
+                            "total_gb": round(usage.total / (1024**3), 1),
+                            "used_gb": round(usage.used / (1024**3), 1),
+                            "free_gb": round(usage.free / (1024**3), 1),
+                            "used_percent": usage.percent,
+                        })
+                    except (PermissionError, OSError):
+                        continue
+                return {"status": "success", "action": "disk_usage",
+                        "drives": drives, "count": len(drives),
+                        "detail": f"Disk usage for {len(drives)} drive(s)"}
+            except ImportError:
+                # Fallback without psutil
+                result = subprocess.run(
+                    ["wmic", "logicaldisk", "get",
+                     "DeviceID,FreeSpace,Size,FileSystem,VolumeName"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=_CREATE_NO_WINDOW
+                )
+                return {"status": "success", "action": "disk_usage",
+                        "output": result.stdout.strip(),
+                        "detail": "Disk usage retrieved"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Disk analysis command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def toggle_bluetooth(action: str = "toggle") -> dict:
+    """Toggle, enable, or disable Bluetooth via PowerShell."""
+    try:
+        act = action.lower().strip()
+
+        # Check current Bluetooth status
+        check_cmd = (
+            "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.FriendlyName -notlike '*Radio*' -or $_.Class -eq 'Bluetooth' } | "
+            "Select-Object -First 1 -ExpandProperty Status"
+        )
+        check_result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", check_cmd],
+            capture_output=True, text=True, timeout=10
+        )
+        current = check_result.stdout.strip().lower()
+        is_enabled = current == "ok"
+
+        if act == "toggle":
+            act = "off" if is_enabled else "on"
+
+        if act in ("on", "enable"):
+            ps_cmd = (
+                "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+                "Enable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, timeout=10
+            )
+            return {"status": "success", "action": "bluetooth_on",
+                    "detail": "Bluetooth enabled"}
+
+        elif act in ("off", "disable"):
+            ps_cmd = (
+                "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+                "Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, timeout=10
+            )
+            return {"status": "success", "action": "bluetooth_off",
+                    "detail": "Bluetooth disabled"}
+
+        elif act == "status":
+            return {"status": "success", "action": "bluetooth_status",
+                    "enabled": is_enabled,
+                    "detail": f"Bluetooth is {'enabled' if is_enabled else 'disabled'}"}
+
+        else:
+            return {"status": "error", "error": f"Unknown bluetooth action: {action}"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Bluetooth command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_display(action: str = "info") -> dict:
+    """
+    Display management: info, set_resolution, list_monitors, rotate.
+    """
+    try:
+        act = action.lower().strip()
+
+        if act in ("info", "resolution"):
+            # Get current resolution via ctypes
+            import ctypes
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            width = user32.GetSystemMetrics(0)   # SM_CXSCREEN
+            height = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+            # DPI
+            try:
+                dpi = user32.GetDpiForSystem()
+            except Exception:
+                dpi = 96
+            scale = round(dpi / 96 * 100)
+
+            # Get refresh rate via PowerShell
+            refresh = "unknown"
+            try:
+                ps_cmd = (
+                    "Get-CimInstance -ClassName Win32_VideoController | "
+                    "Select-Object -First 1 -ExpandProperty CurrentRefreshRate"
+                )
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=5
+                )
+                refresh = result.stdout.strip() + " Hz"
+            except Exception:
+                pass
+
+            return {"status": "success", "action": "display_info",
+                    "width": width, "height": height,
+                    "resolution": f"{width}x{height}",
+                    "dpi": dpi, "scale_percent": scale,
+                    "refresh_rate": refresh,
+                    "detail": f"Display: {width}x{height} at {scale}% scale, {refresh}"}
+
+        elif act == "list_monitors":
+            ps_cmd = (
+                "Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | "
+                "ForEach-Object { "
+                "$name = ($_.UserFriendlyName | ForEach-Object { [char]$_ }) -join ''; "
+                "$mfr = ($_.ManufacturerName | ForEach-Object { [char]$_ }) -join ''; "
+                "Write-Output \"$mfr - $name\" }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=10
+            )
+            monitors = [m.strip() for m in result.stdout.strip().split("\n") if m.strip()]
+            if not monitors:
+                monitors = ["Could not enumerate monitors (may require admin)"]
+            return {"status": "success", "action": "list_monitors",
+                    "count": len(monitors), "monitors": monitors,
+                    "detail": f"Found {len(monitors)} monitor(s)"}
+
+        elif act == "rotate":
+            # Rotate display using PowerShell + display settings shortcut
+            try:
+                import pyautogui  # type: ignore[import]
+                pyautogui.hotkey("ctrl", "alt", "right")
+                import time as _t
+                _t.sleep(0.3)
+                return {"status": "success", "action": "rotate_display",
+                        "detail": "Display rotated (Ctrl+Alt+Arrow). Use same shortcut to rotate back."}
+            except ImportError:
+                return {"status": "error", "error": "pyautogui not installed"}
+
+        else:
+            return {"status": "error", "error": f"Unknown display action: {action}"}
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_power_plan(action: str = "list") -> dict:
+    """
+    Power plan management via powercfg.
+    Actions: list, active, set_high, set_balanced, set_saver.
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+
+        if act == "list" or act == "active":
+            result = subprocess.run(
+                ["powercfg", "/list"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            lines = result.stdout.strip().split("\n")
+            plans = []
+            active_plan = ""
+            for line in lines:
+                line = line.strip()
+                if "GUID" in line:
+                    # Extract name and GUID
+                    import re as _re_pwr
+                    m = _re_pwr.search(r"([0-9a-f\-]{36})\s+\((.+?)\)", line, _re_pwr.IGNORECASE)
+                    if m:
+                        guid = m.group(1)
+                        name = m.group(2)
+                        is_active = "*" in line
+                        plans.append({"guid": guid, "name": name, "active": is_active})
+                        if is_active:
+                            active_plan = name
+            return {"status": "success", "action": "list_power_plans",
+                    "plans": plans, "active": active_plan,
+                    "detail": f"Active power plan: {active_plan}"}
+
+        # Known GUIDs for common power plans
+        PLAN_GUIDS = {
+            "high_performance": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+            "high": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+            "balanced": "381b4222-f694-41f0-9685-ff5bb260df2e",
+            "power_saver": "a1841308-3541-4fab-bc81-f71556f20b4a",
+            "saver": "a1841308-3541-4fab-bc81-f71556f20b4a",
+        }
+
+        plan_key = act.replace("set_", "")
+        guid = PLAN_GUIDS.get(plan_key)
+        if guid:
+            result = subprocess.run(
+                ["powercfg", "/setactive", guid],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            plan_name = plan_key.replace("_", " ").title()
+            if result.returncode == 0:
+                return {"status": "success", "action": "set_power_plan",
+                        "plan": plan_name,
+                        "detail": f"Switched to {plan_name} power plan"}
+            return {"status": "error",
+                    "error": f"Failed to set power plan: {result.stderr[:200]}"}
+
+        return {"status": "error", "error": f"Unknown power plan action: {action}. "
+                "Use: list, set_high, set_balanced, set_saver"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Power plan command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_env_var(action: str = "list", name: str = "", value: str = "") -> dict:
+    """
+    Environment variable management.
+    Actions: list, get, set, delete.
+    """
+    try:
+        act = action.lower().strip()
+
+        if act == "list":
+            env_vars = {}
+            important_keys = ["PATH", "USERPROFILE", "APPDATA", "TEMP", "TMP",
+                              "COMPUTERNAME", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+                              "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+                              "JAVA_HOME", "PYTHON_HOME", "NODE_PATH", "GOPATH"]
+            for key in important_keys:
+                val = os.environ.get(key, "")
+                if val:
+                    # Truncate long values like PATH
+                    env_vars[key] = val[:200] + "..." if len(val) > 200 else val  # type: ignore[index]
+            return {"status": "success", "action": "list_env_vars",
+                    "count": len(env_vars), "variables": env_vars,
+                    "detail": f"Listed {len(env_vars)} key environment variables"}
+
+        elif act == "get":
+            if not name:
+                return {"status": "error", "error": "Need 'name' to get an environment variable"}
+            val = os.environ.get(name.upper(), os.environ.get(name, ""))
+            if val:
+                return {"status": "success", "action": "get_env_var",
+                        "name": name, "value": val[:500],
+                        "detail": f"{name} = {val[:100]}"}
+            return {"status": "error",
+                    "error": f"Environment variable '{name}' not found"}
+
+        elif act == "set":
+            if not name or not value:
+                return {"status": "error",
+                        "error": "Need both 'name' and 'value' to set an environment variable"}
+            # Set via setx (persists across sessions)
+            _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                ["setx", name, value],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            # Also set for current session
+            os.environ[name] = value
+            if result.returncode == 0 or "SUCCESS" in result.stdout.upper():
+                return {"status": "success", "action": "set_env_var",
+                        "name": name, "value": value[:100],
+                        "detail": f"Set {name} = {value[:50]}"}
+            return {"status": "error",
+                    "error": f"Failed to set variable: {result.stderr[:200]}"}
+
+        elif act == "delete":
+            if not name:
+                return {"status": "error",
+                        "error": "Need 'name' to delete an environment variable"}
+            # Delete from registry
+            _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                ["reg", "delete", r"HKCU\Environment", "/v", name, "/f"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            # Remove from current session
+            os.environ.pop(name, None)
+            if result.returncode == 0:
+                return {"status": "success", "action": "delete_env_var",
+                        "name": name,
+                        "detail": f"Deleted environment variable '{name}'"}
+            return {"status": "error",
+                    "error": f"Failed to delete variable: {result.stderr[:200]}"}
+
+        else:
+            return {"status": "error", "error": f"Unknown env var action: {action}"}
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def manage_service(action: str = "list", name: str = "") -> dict:
+    """
+    Windows service control via sc.exe.
+    Actions: list, status, start, stop, restart.
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+        import re as _re_svc
+        safe_name = _re_svc.sub(r'[^a-zA-Z0-9_\-\s]', '', name).strip() if name else ""
+
+        if act == "list":
+            result = subprocess.run(
+                ["sc", "queryex", "type=", "service", "state=", "all"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            services = []
+            lines = result.stdout.split("\n")
+            current = {}
+            for line in lines:
+                line = line.strip()
+                if line.startswith("SERVICE_NAME:"):
+                    if current and current.get("name"):
+                        services.append(current)
+                    current = {"name": line.split(":", 1)[1].strip()}
+                elif line.startswith("DISPLAY_NAME:"):
+                    current["display_name"] = line.split(":", 1)[1].strip()
+                elif line.startswith("STATE"):
+                    # STATE : 4  RUNNING
+                    parts = line.split()
+                    for state in ["RUNNING", "STOPPED", "PAUSED", "START_PENDING", "STOP_PENDING"]:
+                        if state in parts:
+                            current["state"] = state
+                            break
+            if current and current.get("name"):
+                services.append(current)
+            # Only show running or notable services
+            running = [s for s in services if s.get("state") == "RUNNING"]
+            return {"status": "success", "action": "list_services",
+                    "total": len(services), "running_count": len(running),
+                    "running_services": running[:20],
+                    "detail": f"{len(running)} running out of {len(services)} total services"}
+
+        elif act == "status":
+            if not safe_name:
+                return {"status": "error", "error": "Need 'name' to check service status"}
+            result = subprocess.run(
+                ["sc", "query", safe_name],
+                capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            output = result.stdout.strip()
+            state = "UNKNOWN"
+            for s in ["RUNNING", "STOPPED", "PAUSED", "START_PENDING", "STOP_PENDING"]:
+                if s in output:
+                    state = s
+                    break
+            return {"status": "success", "action": "service_status",
+                    "service": safe_name, "state": state,
+                    "output": output[:500],
+                    "detail": f"Service '{safe_name}' is {state}"}
+
+        elif act in ("start", "stop", "restart"):
+            if not safe_name:
+                return {"status": "error", "error": f"Need 'name' to {act} a service"}
+
+            if act == "restart":
+                # Stop then start
+                subprocess.run(
+                    ["sc", "stop", safe_name],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=_CREATE_NO_WINDOW
+                )
+                import time as _t
+                _t.sleep(2)
+                result = subprocess.run(
+                    ["sc", "start", safe_name],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=_CREATE_NO_WINDOW
+                )
+            else:
+                result = subprocess.run(
+                    ["sc", act, safe_name],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=_CREATE_NO_WINDOW
+                )
+
+            combined = result.stdout + result.stderr
+            if result.returncode == 0 or "SUCCESS" in combined.upper():
+                return {"status": "success", "action": f"{act}_service",
+                        "service": safe_name,
+                        "detail": f"Service '{safe_name}' {act}ed successfully"}
+            # Check for access denied
+            if "Access is denied" in combined or "5)" in combined:
+                return {"status": "error",
+                        "error": f"Access denied — need administrator privileges to {act} '{safe_name}'"}
+            return {"status": "error",
+                    "error": f"Failed to {act} service: {combined[:200]}"}
+
+        else:
+            return {"status": "error", "error": f"Unknown service action: {action}"}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "Service command timed out"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def system_sound(action: str = "notification") -> dict:
+    """
+    Play system sounds or manage sound scheme.
+    Actions: notification, error, warning, beep, question, info.
+    """
+    try:
+        act = action.lower().strip()
+        import winsound  # type: ignore[import]
+
+        SOUND_MAP = {
+            "notification": winsound.MB_OK,
+            "info": winsound.MB_OK,
+            "error": winsound.MB_ICONHAND,
+            "warning": winsound.MB_ICONEXCLAMATION,
+            "question": winsound.MB_ICONQUESTION,
+            "beep": None,  # Use Beep()
+            "asterisk": winsound.MB_ICONASTERISK,
+        }
+
+        sound = SOUND_MAP.get(act)
+        if sound is None and act == "beep":
+            winsound.Beep(800, 500)  # 800Hz for 500ms
+            return {"status": "success", "action": "play_sound",
+                    "sound": "beep",
+                    "detail": "Played a beep sound"}
+        elif sound is not None:
+            winsound.MessageBeep(sound)
+            return {"status": "success", "action": "play_sound",
+                    "sound": act,
+                    "detail": f"Played {act} sound"}
+        else:
+            # Try as a .wav file path
+            if os.path.isfile(act):
+                winsound.PlaySound(act, winsound.SND_FILENAME)
+                return {"status": "success", "action": "play_sound",
+                        "file": act,
+                        "detail": f"Played sound file: {act}"}
+            return {"status": "error",
+                    "error": f"Unknown sound: {action}. Use: notification, error, warning, beep, question"}
+
+    except ImportError:
+        return {"status": "error", "error": "winsound is only available on Windows"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def system_power(action: str = "shutdown", delay: int = 0) -> dict:
+    """
+    System power management: shutdown, restart, sleep, hibernate,
+    schedule_shutdown, cancel_shutdown, log_off.
+    """
+    _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        act = action.lower().strip()
+
+        if act == "shutdown":
+            delay_sec = max(0, delay * 60) if delay > 0 else 30  # default 30s warning
+            subprocess.run(
+                ["shutdown", "/s", "/t", str(delay_sec)],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            minutes = delay_sec // 60
+            return {"status": "success", "action": "shutdown",
+                    "delay_seconds": delay_sec,
+                    "detail": f"Computer will shut down in {minutes} minute(s). "
+                              f"Say 'cancel shutdown' to abort."}
+
+        elif act == "restart":
+            delay_sec = max(0, delay * 60) if delay > 0 else 30
+            subprocess.run(
+                ["shutdown", "/r", "/t", str(delay_sec)],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            minutes = delay_sec // 60
+            return {"status": "success", "action": "restart",
+                    "delay_seconds": delay_sec,
+                    "detail": f"Computer will restart in {minutes} minute(s). "
+                              f"Say 'cancel shutdown' to abort."}
+
+        elif act == "sleep":
+            # Windows sleep via PowerShell rundll32
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Add-Type -Assembly System.Windows.Forms; "
+                 "[System.Windows.Forms.Application]::SetSuspendState("
+                 "[System.Windows.Forms.PowerState]::Suspend, $false, $false)"],
+                capture_output=True, timeout=5
+            )
+            return {"status": "success", "action": "sleep",
+                    "detail": "Computer going to sleep"}
+
+        elif act == "hibernate":
+            subprocess.run(
+                ["shutdown", "/h"],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "hibernate",
+                    "detail": "Computer going to hibernate"}
+
+        elif act == "schedule_shutdown":
+            delay_min = delay if delay > 0 else 30
+            delay_sec = delay_min * 60
+            subprocess.run(
+                ["shutdown", "/s", "/t", str(delay_sec)],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "schedule_shutdown",
+                    "delay_minutes": delay_min,
+                    "detail": f"Shutdown scheduled in {delay_min} minutes. "
+                              f"Say 'cancel shutdown' to abort."}
+
+        elif act == "cancel_shutdown":
+            subprocess.run(
+                ["shutdown", "/a"],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "cancel_shutdown",
+                    "detail": "Scheduled shutdown has been cancelled"}
+
+        elif act == "log_off":
+            subprocess.run(
+                ["shutdown", "/l"],
+                capture_output=True, timeout=5,
+                creationflags=_CREATE_NO_WINDOW
+            )
+            return {"status": "success", "action": "log_off",
+                    "detail": "Logging off current user"}
+
+        else:
+            return {"status": "error",
+                    "error": f"Unknown power action: {action}. "
+                    "Use: shutdown, restart, sleep, hibernate, schedule_shutdown, "
+                    "cancel_shutdown, log_off"}
+
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -1462,7 +2921,7 @@ def search_files(query: str, file_type: str = "", days: int = 0) -> dict:
                 continue
             for root, dirs, files in os.walk(search_dir):
                 # Skip hidden/system directories
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                dirs[:] = [d for d in dirs if not d.startswith('.')]  # type: ignore[index]
                 # Limit depth to 3 levels
                 depth = root.replace(search_dir, '').count(os.sep)
                 if depth > 3:
@@ -1476,12 +2935,12 @@ def search_files(query: str, file_type: str = "", days: int = 0) -> dict:
                     # Extension filter
                     if ext_filter:
                         _, ext = os.path.splitext(fname)
-                        if ext.lower() not in ext_filter:
+                        if ext.lower() not in ext_filter:  # type: ignore[operator]
                             continue
                     # Time filter
                     if time_cutoff:
                         try:
-                            if os.path.getmtime(fpath) < time_cutoff:
+                            if os.path.getmtime(fpath) < time_cutoff:  # type: ignore[operator]
                                 continue
                         except OSError:
                             continue
@@ -1544,8 +3003,8 @@ def control_music(action: str) -> dict:
             return {"status": "error", "error": f"Unknown music action: {action}"}
 
         # Simulate key press
-        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY, 0)  # type: ignore[attr-defined]
+        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)  # type: ignore[attr-defined]
 
         return {"status": "success", "action": "music_control",
                 "detail": f"Media action: {act}"}
@@ -1554,7 +3013,7 @@ def control_music(action: str) -> dict:
 
 
 def open_music(query: str) -> dict:
-    """Play music on YouTube — opens search, waits, clicks first video result."""
+    """Play music on YouTube — opens search, waits for page, clicks first video."""
     try:
         import webbrowser
         import urllib.parse
@@ -1563,16 +3022,54 @@ def open_music(query: str) -> dict:
         search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
         webbrowser.open(search_url)
 
-        # Wait for page to load, then click the first video
-        _time.sleep(3.5)
+        # Wait for page to load (using app-ready detection for browser)
+        _time.sleep(4)
 
         try:
-            import pyautogui
-            # Tab through YouTube UI to reach first video result and press Enter
-            # The first video result is typically reachable after a few Tab presses
-            pyautogui.press("tab")
-            _time.sleep(0.3)
-            pyautogui.press("enter")
+            import pyautogui  # type: ignore[import]
+
+            # ── Smart approach: use UI Automation to find the first video ──
+            # YouTube search results contain elements with video titles
+            elements = _get_ui_elements(max_elements=60)
+
+            # Filter: look for elements that are likely video results
+            # Video results are typically hyperlinks with text content
+            # Exclude: logos, nav buttons, search bars, ads labels
+            _IGNORE_NAMES = {
+                "youtube", "home", "shorts", "subscriptions", "you", "library",
+                "history", "sign in", "search", "menu", "settings", "notifications",
+                "create", "guide", "logo", "skip navigation", "",
+            }
+
+            video_candidates = []
+            for e in elements:
+                name = e["name"].strip()
+                name_lower = name.lower()
+                # Skip empty, short names, and known UI elements
+                if len(name) < 5 or name_lower in _IGNORE_NAMES:
+                    continue
+                # Skip elements that look like nav/chrome
+                if any(skip in name_lower for skip in ["subscribe", "filter", "upload", "notification"]):
+                    continue
+                # Prefer hyperlinks and items (video titles)
+                if e["type"] in ("Hyperlink", "ListItem", "Text", "Button", "Custom"):
+                    video_candidates.append(e)
+
+            if video_candidates:
+                # Click the first video candidate
+                first = video_candidates[0]
+                log.info("[open_music] Clicking first video: '%s' at (%d, %d)",
+                         first["name"][:50], first["x"], first["y"])
+                pyautogui.click(first["x"], first["y"])
+            else:
+                # Fallback: use keyboard — skip to content area then down+enter
+                log.info("[open_music] No video elements found, using keyboard fallback")
+                # Press Tab multiple times to skip past YouTube header chrome
+                for _ in range(7):
+                    pyautogui.press("tab")
+                    _time.sleep(0.1)
+                pyautogui.press("enter")
+
         except ImportError:
             pass  # pyautogui not installed — search page is still open
 
@@ -1725,7 +3222,7 @@ _CLIPBOARD_MAX = 20
 
 def _track_clipboard(text: str):
     """Add an entry to clipboard history (called internally)."""
-    if text and text not in _clipboard_history[:3]:  # Avoid duplicates
+    if text and text not in _clipboard_history[:3]:  # type: ignore[index,operator]  # Avoid duplicates
         _clipboard_history.insert(0, text)
         if len(_clipboard_history) > _CLIPBOARD_MAX:
             _clipboard_history.pop()
@@ -1733,7 +3230,7 @@ def _track_clipboard(text: str):
 
 def get_clipboard_history(n: int = 5) -> dict:
     """Return the last N clipboard entries."""
-    entries = _clipboard_history[:n]
+    entries = _clipboard_history[:n]  # type: ignore[index]
     return {
         "status": "success",
         "action": "clipboard_history",
@@ -1815,12 +3312,12 @@ def get_habit_stats(user_id: str, days: int = 7) -> dict:
             name = h.get("habit", "unknown")
             if name not in stats:
                 stats[name] = {"count": 0, "dates": set()}
-            stats[name]["count"] += 1
-            stats[name]["dates"].add(h.get("date", ""))
+            stats[name]["count"] += 1  # type: ignore[operator]
+            stats[name]["dates"].add(h.get("date", ""))  # type: ignore[union-attr]
 
         summary = []
         for name, data in stats.items():
-            streak = len(data["dates"])
+            streak = len(data["dates"])  # type: ignore[arg-type]
             summary.append({
                 "habit": name,
                 "total": data["count"],
@@ -1864,14 +3361,14 @@ def save_mood_entry(user_id: str, emotion: str, confidence: float = 0.0):
 
         moods.append({
             "emotion": emotion,
-            "confidence": round(confidence, 2),
+            "confidence": round(confidence, 2),  # type: ignore[call-overload]
             "timestamp": _time.time(),
             "date": datetime.now().strftime("%Y-%m-%d"),
             "time": datetime.now().strftime("%I:%M %p"),
         })
 
         # Keep last 500 entries
-        moods = moods[-500:]
+        moods = moods[-500:]  # type: ignore[index]
 
         with open(path, "w", encoding="utf-8") as f:
             json.dump(moods, f, indent=2, ensure_ascii=False)
@@ -1903,7 +3400,7 @@ def get_mood_journal(user_id: str, days: int = 7) -> dict:
             emotion_counts[emo] = emotion_counts.get(emo, 0) + 1
 
         # Find dominant emotion
-        dominant = max(emotion_counts, key=emotion_counts.get) if emotion_counts else "neutral"
+        dominant = max(emotion_counts, key=emotion_counts.get) if emotion_counts else "neutral"  # type: ignore[arg-type]
 
         return {
             "status": "success",
@@ -1924,7 +3421,7 @@ def get_mood_journal(user_id: str, days: int = 7) -> dict:
 def read_screen() -> dict:
     """Take a screenshot and extract text via OCR."""
     try:
-        from PIL import ImageGrab
+        from PIL import ImageGrab  # type: ignore[import]
         import tempfile
 
         # Capture screen
@@ -1934,7 +3431,7 @@ def read_screen() -> dict:
 
         # Try OCR with pytesseract
         try:
-            import pytesseract
+            import pytesseract  # type: ignore[import]
             text = pytesseract.image_to_string(screenshot)
             if text.strip():
                 # Truncate to avoid overwhelming the LLM
@@ -1968,7 +3465,7 @@ def read_screen() -> dict:
 def _get_foreground_window_info() -> dict:
     """Get the foreground window handle and title via ctypes."""
     import ctypes
-    user32 = ctypes.windll.user32
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
     hwnd = user32.GetForegroundWindow()
     buf = ctypes.create_unicode_buffer(256)
     user32.GetWindowTextW(hwnd, buf, 256)
@@ -1982,7 +3479,7 @@ def _get_ui_elements(max_elements: int = 80) -> list[dict]:
     Runs in ~50–100ms — no screenshots or OCR needed.
     """
     try:
-        from pywinauto import Desktop
+        from pywinauto import Desktop  # type: ignore[import]
 
         desktop = Desktop(backend="uia")
         try:
@@ -1991,8 +3488,8 @@ def _get_ui_elements(max_elements: int = 80) -> list[dict]:
         except Exception:
             # Fallback: get foreground via ctypes
             import ctypes
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            from pywinauto import Application
+            hwnd = ctypes.windll.user32.GetForegroundWindow()  # type: ignore[attr-defined]
+            from pywinauto import Application  # type: ignore[import]
             app = Application(backend="uia").connect(handle=hwnd)
             fg_wrapper = app.window(handle=hwnd).wrapper_object()
 
@@ -2060,7 +3557,7 @@ def navigate_ui(target: str, settings=None) -> dict:
     5. Scrolls + retries up to 3 times if not found
     """
     import time as _t
-    import pyautogui
+    import pyautogui  # type: ignore[import]
 
     target_lower = target.lower().strip()
     if not target_lower:
@@ -2088,11 +3585,11 @@ def navigate_ui(target: str, settings=None) -> dict:
         # ── LLM-based element selection (most accurate) ────────────────
         best_match = None
         if settings and hasattr(settings, "groq_api_key"):
-            from groq_pool import get_rotator as _get_groq_rotator
+            from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
             _groq_key = _get_groq_rotator().get_key()
             if _groq_key:
                 try:
-                    from groq import Groq
+                    from groq import Groq  # type: ignore[import]
                     client = Groq(api_key=_groq_key)
 
                     # Build element list for LLM
@@ -2101,15 +3598,22 @@ def navigate_ui(target: str, settings=None) -> dict:
                         for i, e in enumerate(elements)
                     )
 
-                    pick_prompt = f"""You are a UI navigation assistant. The user wants to go to: "{target}"
+                    pick_prompt = f"""You are a UI navigation assistant. The user wants to interact with: "{target}"
 
 Current window: "{window_info.get('title', 'Unknown')}"
 
 Visible UI elements:
 {elem_list}
 
-Pick the SINGLE element that best matches the user's intent.
-Reply with ONLY the index number (e.g. "5"). If NONE match, reply "NONE"."""
+RULES:
+1. Pick the SINGLE element that best matches the user's INTENT (what they want to DO, not just text match)
+2. NEVER pick logos, branding icons, or app names that link to homepages (e.g. YouTube logo, Google logo)
+3. NEVER pick navigation items like "Home", "Menu", "Settings", "Sign In" unless the user explicitly asked for them
+4. Prefer CONTENT elements (video titles, document names, links to actual content) over navigation chrome
+5. If the user wants the "first" or a specific result, pick the first content item, NOT header/nav elements
+6. If NONE match the user's intent, reply "NONE"
+
+Reply with ONLY the index number (e.g. "5") or "NONE"."""
 
                     resp = client.chat.completions.create(
                         model=getattr(settings, "groq_model", "llama-3.3-70b-versatile"),
@@ -2181,7 +3685,7 @@ Reply with ONLY the index number (e.g. "5"). If NONE match, reply "NONE"."""
     # All attempts exhausted — try keyboard search as last resort
     log.info("[navigate_ui] Falling back to keyboard search for '%s'", target)
     try:
-        import pyautogui
+        import pyautogui  # type: ignore[import]
         # Try Ctrl+F / Ctrl+E to search within the app
         pyautogui.hotkey("ctrl", "f")
         _t.sleep(0.3)
@@ -2217,7 +3721,7 @@ def switch_and_execute(target_app: str, command: str,
     5. Optionally switches back to the previous window
     """
     import time as _t
-    import pyautogui
+    import pyautogui  # type: ignore[import]
 
     # Save current window
     prev_window = _get_foreground_window_info()
@@ -2279,7 +3783,7 @@ def recall_conversations(user_id: str, query: str, days: int = 7) -> dict:
     try:
         # Try semantic recall via ChromaDB first
         try:
-            from main import memory_recall
+            from main import memory_recall  # type: ignore[import]
             memories = memory_recall(user_id, query, n_results=5)
             if memories:
                 return {
@@ -2294,7 +3798,7 @@ def recall_conversations(user_id: str, query: str, days: int = 7) -> dict:
 
         # Fallback: search conversation_store directly
         try:
-            from memory.conversation_store import load_history
+            from memory.conversation_store import load_history  # type: ignore[import]
             history = load_history(user_id, max_turns=100)
 
             cutoff = (datetime.now() - timedelta(days=days)).timestamp()
@@ -2316,7 +3820,7 @@ def recall_conversations(user_id: str, query: str, days: int = 7) -> dict:
                 "action": "recall_conversations",
                 "query": query,
                 "count": len(matches),
-                "results": matches[:10],
+                "results": matches[:10],  # type: ignore[index]
                 "source": "conversation_store",
             }
         except ImportError:
@@ -2361,11 +3865,11 @@ def send_whatsapp_message(contact: str, message: str, settings=None) -> dict:
     intent_prompt = INTENT_WORDS.get(msg_lower)
 
     if intent_prompt and settings and hasattr(settings, "groq_api_key"):
-        from groq_pool import get_rotator as _get_groq_rotator
+        from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
         _groq_key = _get_groq_rotator().get_key()
         if _groq_key:
             try:
-                from groq import Groq
+                from groq import Groq  # type: ignore[import]
                 client = Groq(api_key=_groq_key)
                 prompt = intent_prompt.format(contact=contact) + " Reply with ONLY the message text, nothing else."
                 resp = client.chat.completions.create(
@@ -2406,11 +3910,13 @@ def send_whatsapp_message(contact: str, message: str, settings=None) -> dict:
                 "store_url": "https://apps.microsoft.com/detail/9NKSQGP7F2NH",
             }
 
-        _time.sleep(3)  # Wait for WhatsApp to open/focus
+        # Wait for WhatsApp window to actually be focused (event-driven, not blind sleep)
+        if not _wait_for_app_window("whatsapp"):
+            return {"status": "error", "error": "WhatsApp did not open in time. Please try again."}
 
         try:
-            import pyautogui
-            import pyperclip
+            import pyautogui  # type: ignore[import]
+            import pyperclip  # type: ignore[import]
         except ImportError:
             return {"status": "error", "error": "pyautogui and pyperclip required for WhatsApp automation"}
 
@@ -2466,11 +3972,13 @@ def send_whatsapp_file(contact: str, file_path: str) -> dict:
                 "store_url": "https://apps.microsoft.com/detail/9NKSQGP7F2NH",
             }
 
-        _time.sleep(3)
+        # Wait for WhatsApp window to actually be focused (event-driven, not blind sleep)
+        if not _wait_for_app_window("whatsapp"):
+            return {"status": "error", "error": "WhatsApp did not open in time. Please try again."}
 
         try:
-            import pyautogui
-            import pyperclip
+            import pyautogui  # type: ignore[import]
+            import pyperclip  # type: ignore[import]
         except ImportError:
             return {"status": "error", "error": "pyautogui and pyperclip required"}
 
@@ -2483,20 +3991,24 @@ def send_whatsapp_file(contact: str, file_path: str) -> dict:
         pyautogui.press("enter")
         _time.sleep(0.5)
 
-        # Open attachment dialog (+ button / paperclip icon)
-        # In WhatsApp Desktop, the attach shortcut is typically via clicking the attachment icon
-        # We use the keyboard shortcut or fall back to clicking
-        pyautogui.hotkey("alt", "a")  # Attach shortcut in some versions
-        _time.sleep(1)
+        # ── Attach file via the attachment popup ──
+        # Step 1: Open the attachment menu (+ button)
+        pyautogui.hotkey("alt", "a")
+        _time.sleep(0.8)
 
-        # Type file path in the file dialog
+        # Step 2: Click "Document" in the popup to open the file dialog
+        _click_whatsapp_document_option()
+        _time.sleep(1.5)  # Wait for the Windows file dialog to open
+
+        # Step 3: Type the file path in the file dialog's filename field
+        # The file name input is typically already focused in the dialog
         pyperclip.copy(safe)
         pyautogui.hotkey("ctrl", "v")
         _time.sleep(0.5)
-        pyautogui.press("enter")
-        _time.sleep(1)
+        pyautogui.press("enter")  # Open/select the file
+        _time.sleep(1.5)  # Wait for WhatsApp to show the file preview
 
-        # Send
+        # Step 4: Send (press Enter on the preview/send button)
         pyautogui.press("enter")
 
         return {
@@ -2508,6 +4020,39 @@ def send_whatsapp_file(contact: str, file_path: str) -> dict:
         }
     except Exception as e:
         return {"status": "error", "error": f"WhatsApp file send failed: {str(e)}"}
+
+
+def _click_whatsapp_document_option():
+    """
+    Click the "Document" option in WhatsApp's attachment popup.
+    Uses UI Automation to find the button, with keyboard fallback.
+    """
+    import time as _t
+    try:
+        import pyautogui  # type: ignore[import]
+    except ImportError:
+        return
+
+    # ── Method 1: Use UI Automation to find "Document" element ──
+    try:
+        elements = _get_ui_elements(max_elements=30)
+        for e in elements:
+            name_lower = e["name"].lower()
+            if "document" in name_lower:
+                pyautogui.click(e["x"], e["y"])
+                log.info("[whatsapp_attach] Clicked 'Document' via UI Automation at (%d, %d)",
+                         e["x"], e["y"])
+                return
+    except Exception as e:
+        log.debug("[whatsapp_attach] UI Automation failed: %s", e)
+
+    # ── Method 2: Keyboard fallback — Document is typically first item ──
+    # In WhatsApp Desktop, after opening the attach popup:
+    # Tab to navigate to Document (first option), then Enter
+    log.info("[whatsapp_attach] Falling back to keyboard navigation for Document")
+    pyautogui.press("tab")
+    _t.sleep(0.2)
+    pyautogui.press("enter")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2554,7 +4099,7 @@ def find_file_smart(name: str, location: str = "") -> dict:
             if not os.path.exists(search_dir):
                 continue
             for root, dirs, files in os.walk(search_dir):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                dirs[:] = [d for d in dirs if not d.startswith('.')]  # type: ignore[index]
                 depth = root.replace(search_dir, '').count(os.sep)
                 if depth > 3:
                     dirs.clear()
@@ -2596,7 +4141,7 @@ def find_file_smart(name: str, location: str = "") -> dict:
 
         # Sort by score (highest first), then most recent
         candidates.sort(key=lambda c: c["score"], reverse=True)
-        top = candidates[:5]
+        top = candidates[:5]  # type: ignore[index]
 
         if not top:
             return {
@@ -2672,7 +4217,7 @@ def send_to_app(contact: str, message: str = "",
                 result["detail"] += f". Please attach '{os.path.basename(file_path)}' manually."
                 result["file_note"] = "Email doesn't support auto-attach. File path copied to clipboard."
                 try:
-                    import pyperclip
+                    import pyperclip  # type: ignore[import]
                     pyperclip.copy(file_path)
                 except Exception:
                     pass
@@ -2698,43 +4243,57 @@ def send_to_app(contact: str, message: str = "",
                 "store_url": app_result.get("store_url", ""),
             }
 
-        _time.sleep(3)
+        # Wait for app window to actually be focused (event-driven, not blind sleep)
+        if not _wait_for_app_window(app_lower):
+            return {"status": "error", "error": f"{app.title()} did not open in time. Please try again."}
 
         try:
-            import pyautogui
-            import pyperclip
+            import pyautogui  # type: ignore[import]
+            import pyperclip  # type: ignore[import]
         except ImportError:
             return {"status": "error",
                     "error": "pyautogui and pyperclip required for app automation"}
 
         # Search for contact
-        keys = profile["search_shortcut"].split("+")
+        keys = profile["search_shortcut"].split("+")  # type: ignore[union-attr]
         pyautogui.hotkey(*keys)
-        _time.sleep(profile["search_delay"])
+        _time.sleep(profile["search_delay"])  # type: ignore[arg-type]
         pyperclip.copy(contact)
         pyautogui.hotkey("ctrl", "v")
-        _time.sleep(profile["contact_delay"])
+        _time.sleep(profile["contact_delay"])  # type: ignore[arg-type]
         pyautogui.press("enter")
         _time.sleep(0.5)
 
         # Send file if provided
         if file_path and os.path.isfile(file_path):
-            # Use drag-and-drop simulation via clipboard for file
-            # Copy file path to clipboard and use attach shortcut
             if app_lower == "whatsapp":
-                pyautogui.hotkey("alt", "a")  # Attach in WhatsApp
+                # WhatsApp: open attach popup → click Document → file dialog
+                pyautogui.hotkey("alt", "a")  # Open attachment menu
+                _time.sleep(0.8)
+                _click_whatsapp_document_option()  # Click "Document"
+                _time.sleep(1.5)  # Wait for file dialog
+                pyperclip.copy(file_path)
+                pyautogui.hotkey("ctrl", "v")
+                _time.sleep(0.5)
+                pyautogui.press("enter")  # Select file
+                _time.sleep(1.5)  # Wait for preview
+                pyautogui.press("enter")  # Send
             elif app_lower == "telegram":
                 pyautogui.hotkey("ctrl", "shift", "f")  # Attach in Telegram
+                _time.sleep(1)
+                pyperclip.copy(file_path)
+                pyautogui.hotkey("ctrl", "v")
+                _time.sleep(0.5)
+                pyautogui.press("enter")
+                _time.sleep(1)
             elif app_lower == "discord":
                 # Discord: use the + button area (just paste the file)
-                pass
-
-            _time.sleep(1)
-            pyperclip.copy(file_path)
-            pyautogui.hotkey("ctrl", "v")
-            _time.sleep(0.5)
-            pyautogui.press("enter")
-            _time.sleep(1)
+                _time.sleep(1)
+                pyperclip.copy(file_path)
+                pyautogui.hotkey("ctrl", "v")
+                _time.sleep(0.5)
+                pyautogui.press("enter")
+                _time.sleep(1)
 
         # Send message if provided
         if message:
@@ -2783,11 +4342,11 @@ def send_file_with_message(contact: str, file_name: str,
     # Step 2: Generate AI message if requested
     message = custom_message
     if (compose_message or not message) and settings and hasattr(settings, "groq_api_key"):
-        from groq_pool import get_rotator as _get_groq_rotator
+        from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
         _groq_key = _get_groq_rotator().get_key()
         if _groq_key:
             try:
-                from groq import Groq
+                from groq import Groq  # type: ignore[import]
                 client = Groq(api_key=_groq_key)
                 compose_prompt = (
                     f"Write a short, friendly 1-sentence message to accompany sending "
@@ -2842,6 +4401,37 @@ def handle_automation(user_text: str, session, settings, system_prompt: str,
     """
     import re
     text_lower = user_text.lower().strip()
+
+    # ── Check if user is confirming to play a recognized song ─────────────
+    recognized = getattr(session, '_recognized_song', None)
+    if recognized:
+        confirm_words = ["yes", "yeah", "yep", "sure", "play", "open", "haan",
+                         "haa", "chala", "baja", "play it", "open it", "play karo",
+                         "ok", "okay", "go ahead", "do it", "play the song",
+                         "play that song", "chalao", "sun"]
+        decline_words = ["no", "nope", "nahi", "don't", "cancel", "skip", "mat",
+                         "rehne do", "nah"]
+        if any(w in text_lower for w in confirm_words):
+            query = recognized["query"]
+            session._recognized_song = None  # Clear so it doesn't trigger again
+            result = open_music(query)
+            return [f"Playing {recognized['title']} by {recognized['artist']} on YouTube!"]
+        elif any(w in text_lower for w in decline_words):
+            session._recognized_song = None
+            return ["Alright, no problem!"]
+        # If neither confirm nor decline, clear and process as normal command
+        session._recognized_song = None
+
+    # ── Play previous/last recognized song ─────────────────────────────
+    last_song = getattr(session, '_last_recognized_song', None)
+    if last_song and any(phrase in text_lower for phrase in [
+        "previous song", "last song", "that song", "the song you identified",
+        "song you found", "pichla gaana", "woh gaana", "identified song",
+        "recognized song", "play the song you", "play what you",
+        "play the previous", "play the last",
+    ]):
+        result = open_music(last_song["query"])
+        return [f"Playing {last_song['title']} by {last_song['artist']} on YouTube!"]
 
     # ── Get foreground window context for smarter decisions ───────────────
     try:
@@ -2910,6 +4500,18 @@ Available actions:
 - {{"action":"recognize_song"}}
 - {{"action":"navigate_ui","target":"<element to find and click>"}}
 - {{"action":"switch_and_execute","app":"<app name>","command":"<what to do in that app>","return":true|false}}
+- {{"action":"manage_process","name":"<process name>","process_action":"info|kill|priority_high|priority_normal|priority_low"}}
+- {{"action":"network_diagnostics","net_action":"ip_config|ping|traceroute|dns_lookup|active_connections|flush_dns|external_ip","target":"<host or IP>"}}
+- {{"action":"manage_scheduled_task","task_action":"list|create|delete|run","name":"<task name>","command":"<command to run>","schedule":"daily|hourly|weekly|once|onlogon"}}
+- {{"action":"manage_startup","startup_action":"list|add|remove","app_name":"<name>","app_path":"<path>"}}
+- {{"action":"analyze_disk","disk_action":"usage|largest_files|health","path":"<optional dir path>"}}
+- {{"action":"toggle_bluetooth","state":"on|off|toggle|status"}}
+- {{"action":"manage_display","display_action":"info|list_monitors|rotate"}}
+- {{"action":"manage_power_plan","plan_action":"list|set_high|set_balanced|set_saver"}}
+- {{"action":"manage_env_var","env_action":"list|get|set|delete","name":"<var name>","value":"<var value>"}}
+- {{"action":"manage_service","service_action":"list|status|start|stop|restart","name":"<service name>"}}
+- {{"action":"system_sound","sound":"notification|error|warning|beep|question"}}
+- {{"action":"system_power","power_action":"shutdown|restart|sleep|hibernate|schedule_shutdown|cancel_shutdown|log_off","delay":<minutes>}}
 
 Default paths: Desktop = "~/Desktop", Downloads = "~/Downloads", Documents = "~/Documents"
 For file paths, ALWAYS use full paths with ~/. Example: "create a python file on desktop" → path = "~/Desktop/script.py"
@@ -3030,11 +4632,11 @@ JSON:"""
     action_data = None
 
     # Try LLM parsing first
-    from groq_pool import get_rotator as _get_groq_rotator
+    from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
     _groq_key = _get_groq_rotator().get_key()
     if _groq_key:
         try:
-            from groq import Groq
+            from groq import Groq  # type: ignore[import]
             client = Groq(api_key=_groq_key)
             resp = client.chat.completions.create(
                 model=settings.groq_model,
@@ -3081,10 +4683,10 @@ JSON:"""
                            "go to the ", "go to my ", "go to ",
                            "open folder ", "open the ", "open my "]:
                 if text_lower.startswith(prefix):
-                    folder = text_lower[len(prefix):].strip()
+                    folder = text_lower[len(prefix):].strip()  # type: ignore[index]
                     break
             # Remove trailing "folder" word
-            folder = folder.replace(" folder", "").strip()
+            folder = folder.replace(" folder", "").strip()  # type: ignore[union-attr]
             if folder in FOLDER_ALIASES or os.path.isdir(os.path.expanduser(folder)):
                 action_data = {"action": "open_folder", "folder": folder}
             else:
@@ -3107,7 +4709,7 @@ JSON:"""
             # Try to extract app name even if not in APP_MAP
             words = text_lower.replace("open", "").strip().split()
             if words:
-                app_guess = " ".join(words[:2])  # first 2 words after "open"
+                app_guess = " ".join(words[:2])  # type: ignore[index]  # first 2 words after "open"
                 action_data = {"action": "open_app", "app": app_guess}
 
         # ── In-app search fallback (BEFORE install/other fallbacks) ────────
@@ -3132,14 +4734,14 @@ JSON:"""
             app = text_lower
             for prefix in ["install ", "download ", "get app ", "get "]:
                 if text_lower.startswith(prefix):
-                    app = text_lower[len(prefix):].strip()
+                    app = text_lower[len(prefix):].strip()  # type: ignore[index]
                     break
             action_data = {"action": "install_app", "app": app}
         elif any(w in text_lower for w in ["uninstall ", "remove app"]):
             app = text_lower
             for prefix in ["uninstall ", "remove app ", "remove "]:
                 if text_lower.startswith(prefix):
-                    app = text_lower[len(prefix):].strip()
+                    app = text_lower[len(prefix):].strip()  # type: ignore[index]
                     break
             action_data = {"action": "uninstall_app", "app": app}
         elif any(w in text_lower for w in ["install status", "what's installing", "check download", "task status"]):
@@ -3195,6 +4797,143 @@ JSON:"""
             else:
                 action_data = {"action": "toggle_wifi", "state": "toggle"}
 
+        # ── Advanced OS Operations (keyword fallback) ──────────────────
+        # Process Management
+        elif any(w in text_lower for w in ["kill process", "end task", "terminate process"]):
+            proc = text_lower
+            for prefix in ["kill process ", "end task ", "terminate process ", "kill "]:
+                if text_lower.startswith(prefix):
+                    proc = text_lower[len(prefix):].strip()
+                    break
+            action_data = {"action": "manage_process", "name": proc, "process_action": "kill"}
+        elif any(w in text_lower for w in ["process info", "process details", "process status"]):
+            proc = text_lower.replace("process info", "").replace("process details", "").replace("process status", "").strip()
+            action_data = {"action": "manage_process", "name": proc or "chrome", "process_action": "info"}
+        elif any(w in text_lower for w in ["high priority", "set priority"]):
+            proc = text_lower.replace("high priority", "").replace("set priority", "").replace("for", "").strip()
+            action_data = {"action": "manage_process", "name": proc, "process_action": "priority_high"}
+
+        # Network Diagnostics
+        elif any(w in text_lower for w in ["ping ", "ping google", "ping test"]):
+            target = text_lower.replace("ping", "").strip() or "google.com"
+            action_data = {"action": "network_diagnostics", "net_action": "ping", "target": target}
+        elif any(w in text_lower for w in ["my ip", "ip address", "what is my ip", "ipconfig", "ip config"]):
+            action_data = {"action": "network_diagnostics", "net_action": "ip_config"}
+        elif any(w in text_lower for w in ["traceroute", "tracert"]):
+            target = text_lower.replace("traceroute", "").replace("tracert", "").strip() or "google.com"
+            action_data = {"action": "network_diagnostics", "net_action": "traceroute", "target": target}
+        elif any(w in text_lower for w in ["dns lookup", "nslookup"]):
+            target = text_lower.replace("dns lookup", "").replace("nslookup", "").strip() or "google.com"
+            action_data = {"action": "network_diagnostics", "net_action": "dns_lookup", "target": target}
+        elif any(w in text_lower for w in ["active connections", "netstat", "network connections"]):
+            action_data = {"action": "network_diagnostics", "net_action": "active_connections"}
+        elif any(w in text_lower for w in ["flush dns", "clear dns"]):
+            action_data = {"action": "network_diagnostics", "net_action": "flush_dns"}
+        elif any(w in text_lower for w in ["external ip", "public ip"]):
+            action_data = {"action": "network_diagnostics", "net_action": "external_ip"}
+
+        # Scheduled Tasks
+        elif any(w in text_lower for w in ["scheduled task", "list tasks", "show tasks", "cron job"]):
+            action_data = {"action": "manage_scheduled_task", "task_action": "list"}
+
+        # Startup Apps
+        elif any(w in text_lower for w in ["startup app", "startup program", "boot app",
+                                            "show startup", "list startup", "auto start"]):
+            action_data = {"action": "manage_startup", "startup_action": "list"}
+
+        # Disk Analysis
+        elif any(w in text_lower for w in ["disk usage", "disk space", "drive space", "storage space",
+                                            "how much space", "free space"]):
+            action_data = {"action": "analyze_disk", "disk_action": "usage"}
+        elif any(w in text_lower for w in ["largest file", "biggest file", "large files"]):
+            action_data = {"action": "analyze_disk", "disk_action": "largest_files"}
+        elif any(w in text_lower for w in ["disk health", "drive health", "smart status"]):
+            action_data = {"action": "analyze_disk", "disk_action": "health"}
+
+        # Bluetooth
+        elif "bluetooth" in text_lower:
+            if any(w in text_lower for w in ["on", "enable", "chalu"]):
+                action_data = {"action": "toggle_bluetooth", "state": "on"}
+            elif any(w in text_lower for w in ["off", "disable", "band"]):
+                action_data = {"action": "toggle_bluetooth", "state": "off"}
+            elif "status" in text_lower:
+                action_data = {"action": "toggle_bluetooth", "state": "status"}
+            else:
+                action_data = {"action": "toggle_bluetooth", "state": "toggle"}
+
+        # Display Management
+        elif any(w in text_lower for w in ["screen resolution", "display resolution", "my resolution",
+                                            "what resolution", "current resolution"]):
+            action_data = {"action": "manage_display", "display_action": "info"}
+        elif any(w in text_lower for w in ["connected monitor", "list monitor", "how many monitor",
+                                            "display info", "monitor info"]):
+            action_data = {"action": "manage_display", "display_action": "list_monitors"}
+        elif any(w in text_lower for w in ["rotate screen", "rotate display", "flip screen"]):
+            action_data = {"action": "manage_display", "display_action": "rotate"}
+
+        # Power Plans
+        elif any(w in text_lower for w in ["power plan", "power mode", "energy mode"]):
+            if any(w in text_lower for w in ["high performance", "high", "gaming", "performance"]):
+                action_data = {"action": "manage_power_plan", "plan_action": "set_high"}
+            elif any(w in text_lower for w in ["balanced", "normal", "default"]):
+                action_data = {"action": "manage_power_plan", "plan_action": "set_balanced"}
+            elif any(w in text_lower for w in ["saver", "power saver", "battery saver", "save"]):
+                action_data = {"action": "manage_power_plan", "plan_action": "set_saver"}
+            else:
+                action_data = {"action": "manage_power_plan", "plan_action": "list"}
+        elif any(w in text_lower for w in ["high performance"]):
+            action_data = {"action": "manage_power_plan", "plan_action": "set_high"}
+
+        # Environment Variables
+        elif any(w in text_lower for w in ["environment variable", "env var", "system variable"]):
+            action_data = {"action": "manage_env_var", "env_action": "list"}
+
+        # Windows Services
+        elif any(w in text_lower for w in ["windows service", "list service", "show service",
+                                            "running service"]):
+            action_data = {"action": "manage_service", "service_action": "list"}
+        elif any(w in text_lower for w in ["start service", "stop service", "restart service"]):
+            svc_action = "start"
+            if "stop" in text_lower:
+                svc_action = "stop"
+            elif "restart" in text_lower:
+                svc_action = "restart"
+            svc_name = text_lower.replace("start service", "").replace("stop service", "").replace("restart service", "").strip()
+            action_data = {"action": "manage_service", "service_action": svc_action, "name": svc_name}
+
+        # System Sound
+        elif any(w in text_lower for w in ["play sound", "system sound", "notification sound",
+                                            "play beep", "beep"]):
+            sound = "notification"
+            if "error" in text_lower: sound = "error"
+            elif "warning" in text_lower: sound = "warning"
+            elif "beep" in text_lower: sound = "beep"
+            action_data = {"action": "system_sound", "sound": sound}
+
+        # Shutdown / Restart / Sleep / Hibernate
+        elif any(w in text_lower for w in ["shut down", "shutdown", "turn off computer",
+                                            "turn off pc", "switch off"]):
+            action_data = {"action": "system_power", "power_action": "shutdown", "delay": 0}
+        elif any(w in text_lower for w in ["restart computer", "restart pc", "restart system",
+                                            "reboot", "reboot pc"]):
+            action_data = {"action": "system_power", "power_action": "restart", "delay": 0}
+        elif any(w in text_lower for w in ["sleep mode", "put to sleep", "go to sleep",
+                                            "sleep computer", "computer sleep"]):
+            action_data = {"action": "system_power", "power_action": "sleep"}
+        elif "hibernate" in text_lower:
+            action_data = {"action": "system_power", "power_action": "hibernate"}
+        elif any(w in text_lower for w in ["cancel shutdown", "abort shutdown", "stop shutdown"]):
+            action_data = {"action": "system_power", "power_action": "cancel_shutdown"}
+        elif any(w in text_lower for w in ["schedule shutdown", "shutdown in", "shut down in"]):
+            import re as _re_delay
+            m = _re_delay.search(r"(\d+)\s*(?:min|minute|hour|hr)", text_lower)
+            delay = int(m.group(1)) if m else 30
+            if "hour" in text_lower or "hr" in text_lower:
+                delay = delay * 60
+            action_data = {"action": "system_power", "power_action": "schedule_shutdown", "delay": delay}
+        elif any(w in text_lower for w in ["log off", "logoff", "sign out", "sign off"]):
+            action_data = {"action": "system_power", "power_action": "log_off"}
+
         # Music Control
         elif any(w in text_lower for w in ["play music", "resume music", "gaana bajao"]):
             action_data = {"action": "control_music", "control": "play"}
@@ -3237,7 +4976,7 @@ JSON:"""
             habit = text_lower
             for prefix in ["i ", "i've ", "i just "]:
                 if text_lower.startswith(prefix):
-                    habit = text_lower[len(prefix):]
+                    habit = text_lower[len(prefix):]  # type: ignore[index]
                     break
             action_data = {"action": "log_habit", "habit": habit}
         elif any(w in text_lower for w in ["my habits", "habit stats", "show streak", "habit tracker"]):
@@ -3255,11 +4994,18 @@ JSON:"""
         elif any(w in text_lower for w in ["remember when", "what did we talk", "recall", "past conversation", "do you remember", "yaad hai"]):
             action_data = {"action": "recall_memory", "query": user_text}
 
-        # Song Recognition
-        elif any(w in text_lower for w in ["what song", "which song", "identify song", "identify this song",
-                                            "recognize song", "recognize this song",
-                                            "name this song", "shazam", "what is playing", "what's playing",
-                                            "konsa gaana", "ye gaana", "what music", "this song"]):
+        # Song Recognition — broad natural triggers (no strict word boundaries)
+        elif any(w in text_lower for w in [
+            "what song", "which song", "identify song", "identify this song",
+            "recognize song", "recognize this song", "name this song",
+            "shazam", "what is playing", "what's playing", "what is this song",
+            "what's this song", "konsa gaana", "ye gaana", "what music",
+            "this song", "ye kya baj", "kya baj raha", "song playing",
+            "bata ye gaana", "gaana bata", "song bata", "pehchaan",
+            "which music", "what tune", "which tune", "identify the song",
+            "tell me the song", "what am i listening", "listening to what",
+            "song is this", "music is this", "what's the name of this",
+        ]):
             action_data = {"action": "recognize_song"}
 
         # Smart Search
@@ -3267,13 +5013,13 @@ JSON:"""
             query = text_lower
             for prefix in ["find file ", "search file ", "locate file ", "find the ", "find my ", "find "]:
                 if text_lower.startswith(prefix):
-                    query = text_lower[len(prefix):]
+                    query = text_lower[len(prefix):]  # type: ignore[index]
                     break
             file_type = ""
             for ft in ["pdf", "document", "image", "photo", "video", "audio", "excel"]:
                 if ft in text_lower:
                     file_type = ft
-                    query = query.replace(ft, "").strip()
+                    query = query.replace(ft, "").strip()  # type: ignore[union-attr]
                     break
             days = 0
             if "yesterday" in text_lower:
@@ -3331,7 +5077,7 @@ JSON:"""
             for strip_w in ["send", "share", "the", "file", "document", "photo", "video",
                            "to", "on", "via", "with", "bhejo", "this", "it", "ye", "isko",
                            "which is", "from", "in", "pe", "ko",
-                           contact.lower(), app, location, "whatsapp"]:
+                           contact.lower(), str(app), str(location), "whatsapp"]:  # type: ignore[arg-type]
                 file_hint = file_hint.replace(strip_w, "")
             file_hint = file_hint.strip()
             action_data = {"action": "send_file_smart", "contact": contact,
@@ -3402,11 +5148,29 @@ JSON:"""
         "read_screen": lambda d: read_screen(),
         "recall_memory": lambda d: recall_conversations(session.user_id, d.get("query", ""), d.get("days", 7)),
         "recognize_song": lambda d: {"status": "success", "action": "recognize_song", "_ws_trigger": "start_song_recognition", "detail": "Listening to the song for 8 seconds..."},
-        "send_whatsapp": lambda d: send_whatsapp_message(d.get("contact", ""), d.get("message", ""), settings),
-        "send_whatsapp_file": lambda d: send_whatsapp_file(d.get("contact", ""), d.get("file_path", "")),
-        # ── Intelligent file sharing ───────────────────────────────────
-        "send_to_app": lambda d: send_to_app(d.get("contact", ""), d.get("message", ""), d.get("app", "whatsapp"), d.get("file_path", "")),
-        "send_file_smart": lambda d: send_file_with_message(d.get("contact", ""), d.get("file_name", ""), d.get("app", "whatsapp"), d.get("custom_message", ""), d.get("compose_message", False), location=d.get("location", ""), session=session, settings=settings),
+        # ── Non-blocking messaging (runs in background thread) ──────
+        "send_whatsapp": lambda d: _task_manager.start_task(
+            f"whatsapp_msg_{d.get('contact','')[:10]}_{int(_time_module.time())}",
+            send_whatsapp_message, (d.get("contact", ""), d.get("message", ""), settings),
+            description=f"Sending WhatsApp message to {d.get('contact', '')}"),
+        "send_whatsapp_file": lambda d: _task_manager.start_task(
+            f"whatsapp_file_{d.get('contact','')[:10]}_{int(_time_module.time())}",
+            send_whatsapp_file, (d.get("contact", ""), d.get("file_path", "")),
+            description=f"Sending file to {d.get('contact', '')} on WhatsApp"),
+        # ── Intelligent file sharing (non-blocking) ───────────────────
+        "send_to_app": lambda d: _task_manager.start_task(
+            f"send_{d.get('app','wa')[:10]}_{d.get('contact','')[:10]}_{int(_time_module.time())}",
+            send_to_app, (d.get("contact", ""), d.get("message", ""), d.get("app", "whatsapp"), d.get("file_path", "")),
+            description=f"Sending to {d.get('contact', '')} on {d.get('app', 'WhatsApp')}"),
+        "send_file_smart": lambda d: _task_manager.start_task(
+            f"send_file_{d.get('contact','')[:10]}_{int(_time_module.time())}",
+            lambda: send_file_with_message(
+                d.get("contact", ""), d.get("file_name", ""),
+                d.get("app", "whatsapp"), d.get("custom_message", ""),
+                d.get("compose_message", False),
+                location=d.get("location", ""),
+                session=session, settings=settings),
+            description=f"Sending file '{d.get('file_name', '')}' to {d.get('contact', '')}"),
         "find_file": lambda d: find_file_smart(d.get("name", ""), location=d.get("location", "")),
         # ── Install / Uninstall (background) ───────────────────────────
         "install_app": lambda d: install_app(d.get("app", "")),
@@ -3415,12 +5179,39 @@ JSON:"""
         # ── Visual Context Automation ─────────────────────────────────
         "navigate_ui": lambda d: navigate_ui(d.get("target", ""), settings=settings),
         "switch_and_execute": lambda d: switch_and_execute(d.get("app", ""), d.get("command", ""), d.get("return", True), settings=settings),
+        # ── Advanced OS Operations ─────────────────────────────────────
+        "manage_process": lambda d: manage_process(d.get("name", ""), d.get("process_action", "info")),
+        "network_diagnostics": lambda d: network_diagnostics(d.get("net_action", "ip_config"), d.get("target", "")),
+        "manage_scheduled_task": lambda d: manage_scheduled_task(d.get("task_action", "list"), d.get("name", ""), d.get("command", ""), d.get("schedule", "")),
+        "manage_startup": lambda d: manage_startup_apps(d.get("startup_action", "list"), d.get("app_name", ""), d.get("app_path", "")),
+        "analyze_disk": lambda d: analyze_disk(d.get("disk_action", "usage"), d.get("path", "")),
+        "toggle_bluetooth": lambda d: toggle_bluetooth(d.get("state", "toggle")),
+        "manage_display": lambda d: manage_display(d.get("display_action", "info")),
+        "manage_power_plan": lambda d: manage_power_plan(d.get("plan_action", "list")),
+        "manage_env_var": lambda d: manage_env_var(d.get("env_action", "list"), d.get("name", ""), d.get("value", "")),
+        "manage_service": lambda d: manage_service(d.get("service_action", "list"), d.get("name", "")),
+        "system_sound": lambda d: system_sound(d.get("sound", "notification")),
+        "system_power": lambda d: system_power(d.get("power_action", "shutdown"), d.get("delay", 0)),
     }
 
-    handler = ACTION_MAP.get(action)
+    handler = ACTION_MAP.get(action)  # type: ignore[call-overload]
     if handler:
-        log.info("[%s] Executing automation: %s | data=%s", session.session_id, action, json.dumps(action_data)[:100])
+        log.info("[%s] Executing automation: %s | data=%s", session.session_id, action, json.dumps(action_data)[:100])  # type: ignore[index]
         result = handler(action_data)
+
+        # ── Smart fallback: open_app failed → try open_folder ─────────
+        # When user says "open Price" while viewing Downloads in Explorer,
+        # the LLM parses it as open_app("price") which fails. This fallback
+        # tries open_folder which resolves "price" as a subfolder.
+        if action == "open_app" and result and result.get("status") in ("error", "not_installed"):
+            app_name = action_data.get("app", "")
+            if app_name:
+                folder_result = open_folder(str(app_name))  # type: ignore[arg-type]
+                if folder_result.get("status") == "success":
+                    log.info("[%s] open_app failed → open_folder fallback succeeded for '%s'",
+                             session.session_id, app_name)
+                    result = folder_result
+
         # Check if this triggers dictation mode
         if result and result.get("dictation_mode"):
             session.dictation_active = True
@@ -3449,11 +5240,11 @@ JSON:"""
 
     # ── Format result via LLM ─────────────────────────────────────────────
     if result:
-        from groq_pool import get_rotator as _get_groq_rotator
+        from groq_pool import get_rotator as _get_groq_rotator  # type: ignore[import]
         _groq_key = _get_groq_rotator().get_key()
         if _groq_key:
             try:
-                from groq import Groq
+                from groq import Groq  # type: ignore[import]
                 client = Groq(api_key=_groq_key)
 
                 format_prompt = f"""You are Alita, a voice assistant. 
@@ -3487,7 +5278,7 @@ Give a natural, concise spoken response (1 sentence). Sound human, not robotic."
         else:
             tokens = [f"Error: {result.get('error', 'Unknown error')}"]
         if meta:
-            tokens.append(meta)
+            tokens.append(meta)  # type: ignore[arg-type]
         return tokens
 
     return ["I completed the action but couldn't verify the result."]

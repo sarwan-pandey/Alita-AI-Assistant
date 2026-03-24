@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Alita Assistant — Root App
  * Redesigned: AI Assistant Dashboard UI
  *   - 3-column layout: SearchHistory | Center Soundwave | SearchResults
@@ -21,14 +21,18 @@ import { ThinkingDots } from "./components/ui/AuraAnimations";
 import { Header } from "./components/ui/Header";
 import { SearchHistory } from "./components/ui/SearchHistory";
 import { SearchResults } from "./components/ui/SearchResults";
-import { BottomNav } from "./components/ui/BottomNav";
-import { SoundwaveOrb } from "./components/ui/SoundwaveOrb";
+// ── Avatar swap ── comment/uncomment to toggle between avatars ────────────
+// import { AnimeAvatar } from "./components/ui/AnimeAvatar";   // ← original
+// import { EarthParticleAvatar } from "./components/canvas/EarthParticleAvatar"; // ← replaced
+import { SovereignEntity } from "./components/canvas/SovereignEntity";
+import { AdvancedFeatures } from "./components/AdvancedFeatures";
 
 // Geospatial dashboard — lazy loaded
 const GeoApp = lazy(() => import("./components/geo/GeoApp"));
 
 import { useSessionStore } from "./store/useSessionStore";
 import { useEmotionStore } from "./store/useEmotionStore";
+import { useSubscriptionStore } from "./store/useSubscriptionStore";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useTheme } from "./hooks/useTheme";
 import { useNotifications } from "./hooks/useNotifications";
@@ -97,11 +101,13 @@ export default function App() {
   const { user, setUser, accessToken, setAccessToken, tier, setTier, clearSession } =
     useSessionStore();
 
-  const { setEmotion } = useEmotionStore();
+  const { setEmotion, setFaceData } = useEmotionStore();
+  const faceData = useEmotionStore((s) => s.faceData);
 
   // ── Theme & Notifications ───────────────────────────────────────────
   const { mode: themeMode, cycleTheme } = useTheme();
   const notifications = useNotifications();
+  const { isPremium, isTrialActive, trialDaysRemaining } = useSubscriptionStore();
 
   const [messages, setMessages] = useState([]);
   const [isListening, setIsListening] = useState(false);
@@ -116,6 +122,7 @@ export default function App() {
   const [voiceLang, setVoiceLang] = useState("en");
   const [autoVoiceId, setAutoVoiceId] = useState(null);
   const [musicDetected, setMusicDetected] = useState(false);
+  const [userVoiceActivity, setUserVoiceActivity] = useState(0);
 
   // ── Dynamic search state ────────────────────────────────────────────────
   const [searchHistory, setSearchHistory] = useState({});
@@ -216,7 +223,11 @@ export default function App() {
         break;
 
       case "tts_audio":
-        setIsSpeaking(true);
+        // Set speaking on any non-empty TTS chunk (sentence-level streaming)
+        if (msg.audio_b64) {
+          setIsSpeaking(true);
+          setIsThinking(false);
+        }
         window.dispatchEvent(
           new CustomEvent("Alita:tts_chunk", { detail: msg })
         );
@@ -325,13 +336,45 @@ export default function App() {
         }
         break;
 
+      // ── Emergency & Environment ─────────────────────────────────────
+      case "emergency_alert":
+        window.dispatchEvent(
+          new CustomEvent("Alita:emergency_alert", { detail: msg })
+        );
+        setErrorToast(`🚨 EMERGENCY: ${msg.sound} detected — auto-recording started`);
+        // Don't auto-dismiss emergency toast
+        break;
+
+      case "environment_update":
+        window.dispatchEvent(
+          new CustomEvent("Alita:environment_update", { detail: msg })
+        );
+        break;
+
+      // ── Alita Face Data (from ALITA_FACE_DATA JSON block) ─────────
+      case "face_data":
+        // Dispatch to any listener (SovereignEntity, legacy, etc.)
+        window.dispatchEvent(
+          new CustomEvent("Alita:face_data", { detail: msg.content || {} })
+        );
+        // Store faceData for SovereignEntity prop
+        setFaceData(msg.content || null);
+        // Update emotion store with the user's detected emotion from Alita's analysis
+        if (msg.content?.user_emotion_detected) {
+          setEmotion({
+            label: msg.content.user_emotion_detected,
+            confidence: msg.content.ser_confidence || 0.5,
+          });
+        }
+        break;
+
       default:
         break;
     }
-  }, [setTier, setEmotion, trackSearch]);
+  }, [setTier, setEmotion, setFaceData, trackSearch]);
 
   // ── WebSocket ─────────────────────────────────────────────────────────
-  const { sendAudioChunk, sendTextMessage, sendDictation, sendDictationStop, wsStatus } = useWebSocket({
+  const { sendAudioChunk, sendBinaryChunk, sendTextMessage, sendDictation, sendDictationStop, sendBargeIn, sendSpeculativeQuery, cancelSpeculative, wsStatus } = useWebSocket({
     token: accessToken,
     onMessage: handleWSMessage,
     enabled: !!accessToken,
@@ -348,6 +391,27 @@ export default function App() {
     window.addEventListener("Alita:song_audio_ready", handler);
     return () => window.removeEventListener("Alita:song_audio_ready", handler);
   }, [sendAudioChunk]);
+
+  // ── Offline mode: forward connectivity changes to backend ──────────────
+  useEffect(() => {
+    const connectivityHandler = (e) => {
+      const { online } = e.detail || {};
+      sendAudioChunk({ type: "connectivity_status", online: !!online });
+    };
+    const offlineAudioHandler = (e) => {
+      const { pcm_binary } = e.detail || {};
+      if (pcm_binary) {
+        // Send as raw binary ArrayBuffer (8× more efficient than JSON)
+        sendBinaryChunk(pcm_binary);
+      }
+    };
+    window.addEventListener("Alita:connectivity_change", connectivityHandler);
+    window.addEventListener("Alita:offline_audio_chunk", offlineAudioHandler);
+    return () => {
+      window.removeEventListener("Alita:connectivity_change", connectivityHandler);
+      window.removeEventListener("Alita:offline_audio_chunk", offlineAudioHandler);
+    };
+  }, [sendAudioChunk, sendBinaryChunk]);
 
   const handleSpeechStart = useCallback(() => {
     setIsListening(true);
@@ -382,40 +446,7 @@ export default function App() {
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* ─── View Toggle (always visible) ─── */}
-      <div className="view-toggle-bar">
-        <button
-          className={`view-toggle-btn ${activeView === "alita" ? "active" : ""}`}
-          onClick={() => setActiveView("alita")}
-        >
-          <span className="view-toggle-dot" />
-          Alita
-        </button>
-        <button
-          className={`view-toggle-btn ${activeView === "geospatial" ? "active" : ""}`}
-          onClick={() => {
-            if (tier === "free") {
-              setShowPricing(true);
-            } else {
-              setActiveView("geospatial");
-            }
-          }}
-        >
-          <span className="view-toggle-dot" />
-          Geospatial
-          {tier === "free" && <span style={{
-            fontSize: "0.55rem",
-            background: "rgba(192,132,252,0.15)",
-            border: "1px solid rgba(192,132,252,0.3)",
-            borderRadius: "3px",
-            padding: "1px 5px",
-            color: "#c084fc",
-            marginLeft: "6px",
-            letterSpacing: "0.1em",
-            fontWeight: 700,
-          }}>PRO</span>}
-        </button>
-      </div>
+      {/* View toggle moved to bottom — see below BottomNav slot */}
 
       {/* ─── AudioCapture — ALWAYS MOUNTED (persists across view switches) ─── */}
       <AudioCapture
@@ -434,6 +465,10 @@ export default function App() {
           setDictationMode(null);
         }}
         onMusicDetected={(detected) => setMusicDetected(detected)}
+        onVoiceActivity={(activity) => setUserVoiceActivity(activity)}
+        sendBargeIn={sendBargeIn}
+        sendSpeculativeQuery={sendSpeculativeQuery}
+        cancelSpeculative={cancelSpeculative}
       />
 
       {/* ─── Geospatial View (full viewport, outside grid) ─── */}
@@ -478,6 +513,9 @@ export default function App() {
           <Header
             user={user}
             tier={tier}
+            isPremium={isPremium}
+            isTrialActive={isTrialActive}
+            trialDaysRemaining={trialDaysRemaining}
             onLogout={async () => {
               await supabase.auth.signOut();
               clearSession();
@@ -486,6 +524,7 @@ export default function App() {
             theme={{ mode: themeMode }}
             onThemeCycle={cycleTheme}
             notifications={notifications}
+            onShowPricing={() => window.dispatchEvent(new Event("Alita:show_pricing"))}
           />
 
           {/* ─── Dashboard Body (3-column) ─── */}
@@ -494,25 +533,45 @@ export default function App() {
             {/* Left: Search History */}
             <SearchHistory items={historyItems} />
 
-            {/* Center: Soundwave + Listening */}
+            {/* Center: Sovereign Entity — Fullscreen Canvas */}
             <div className="center-panel">
-              {/* WS status */}
+              {/* WS status — minimal top-left indicator */}
               <div className="center-ws-status">
                 <div className={`center-ws-dot ${wsStatus}`} />
-                <span>{wsStatus === "open" ? "connected" : wsStatus}</span>
+                <span>{wsStatus === "open" ? "online" : wsStatus}</span>
               </div>
 
-              {/* Soundwave Orb — replaces 3D particle canvas */}
+              {/* ── The Sovereign Entity — fills the viewport ── */}
               <div className="canvas-container">
-                <SoundwaveOrb isListening={isListening} isThinking={isThinking} isSpeaking={isSpeaking} />
+                <SovereignEntity
+                  faceData={faceData}
+                  isListening={isListening}
+                  isThinking={isThinking}
+                  isSpeaking={isSpeaking}
+                  voiceActivity={userVoiceActivity}
+                />
+              </div>
 
-                {/* Voice-only mode — no chat bubbles, only status */}
+              {/* ── Unified HUD overlay — bottom center ── */}
+              <div className="sovereign-hud">
+                {/* Status line */}
+                <div className={`hud-status ${isListening ? "listening" : ""} ${isThinking ? "thinking" : ""} ${isSpeaking ? "speaking" : ""}`}>
+                  <div className="hud-status-dot" />
+                  <span className="hud-status-label">
+                    {isThinking ? "Processing" : isListening ? "Listening" : isSpeaking ? "Speaking" : "Ready"}
+                  </span>
+                  {currentQuery && (
+                    <span className="hud-query-text">— {currentQuery}</span>
+                  )}
+                </div>
+
+                {/* ThinkingDots when processing */}
                 <ThinkingDots visible={isThinking} />
 
-                {/* Text input */}
+                {/* Command input bar */}
                 {wsStatus === "open" && (
                   <form
-                    className="text-input-bar"
+                    className="hud-input-bar"
                     onSubmit={(e) => {
                       e.preventDefault();
                       const input = e.target.elements.chatInput;
@@ -529,30 +588,22 @@ export default function App() {
                       setIsThinking(true);
                     }}
                   >
+                    <div className="hud-input-glow" />
                     <input
                       id="chatInput"
                       name="chatInput"
                       type="text"
-                      placeholder="Type a message…"
+                      placeholder="Ask Alita anything…"
                       autoComplete="off"
-                      className="text-input-field"
+                      className="hud-input-field"
                     />
-                    <button type="submit" className="text-input-send">➤</button>
+                    <button type="submit" className="hud-input-send">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+                      </svg>
+                    </button>
                   </form>
                 )}
-              </div>
-
-              {/* Query text */}
-              <div className="center-query-text">
-                {currentQuery || "Ask me anything..."}
-              </div>
-
-              {/* Listening state */}
-              <div className="center-listening">
-                <span className="center-listening-text">
-                  {isThinking ? "Thinking..." : isListening ? "Listening..." : "Ready"}
-                </span>
-                <div className={`center-listening-dot ${isListening ? "active" : ""} ${isThinking ? "thinking" : ""}`} />
               </div>
             </div>
 
@@ -560,8 +611,40 @@ export default function App() {
             <SearchResults result={lastSearchResult} />
           </div>
 
-          {/* ─── Bottom Nav ─── */}
-          <BottomNav />
+          {/* ─── Bottom View Toggle (replaces BottomNav) ─── */}
+          <div className="view-toggle-bar">
+            <button
+              className={`view-toggle-btn ${activeView === "alita" ? "active" : ""}`}
+              onClick={() => setActiveView("alita")}
+            >
+              <span className="view-toggle-dot" />
+              Alita
+            </button>
+            <button
+              className={`view-toggle-btn ${activeView === "geospatial" ? "active" : ""}`}
+              onClick={() => {
+                if (tier === "free") {
+                  setShowPricing(true);
+                } else {
+                  setActiveView("geospatial");
+                }
+              }}
+            >
+              <span className="view-toggle-dot" />
+              Geospatial
+              {tier === "free" && <span style={{
+                fontSize: "0.55rem",
+                background: "rgba(192,132,252,0.15)",
+                border: "1px solid rgba(192,132,252,0.3)",
+                borderRadius: "3px",
+                padding: "1px 5px",
+                color: "#c084fc",
+                marginLeft: "6px",
+                letterSpacing: "0.1em",
+                fontWeight: 700,
+              }}>PRO</span>}
+            </button>
+          </div>
 
           {/* Voice model changer */}
           <VoiceModelChanger
@@ -622,6 +705,14 @@ export default function App() {
           )}
 
           {(tier === "free" || showPricing) && <TierGate onClose={() => setShowPricing(false)} />}
+
+          {/* ─── Advanced Features (10 features, self-contained) ─── */}
+          <AdvancedFeatures
+            enabled={wsStatus === "open"}
+            messages={messages}
+            currentLang={voiceLang}
+            sendAudioChunk={sendAudioChunk}
+          />
 
         </div>
       )}
