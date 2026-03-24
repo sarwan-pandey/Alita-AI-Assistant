@@ -26,8 +26,8 @@ models/
 .git/
 .gitignore
 
-# ── Tests ───────────────────────────────────────────────────────────────────
-test_*.py
+# ── Tests (keep test_auth.py — it's a runtime module) ───────────────────────
+# test_*.py  ← REMOVED: test_auth.py is required by main.py
 
 # ── Keys backup ─────────────────────────────────────────────────────────────
 .keys_backup.json
