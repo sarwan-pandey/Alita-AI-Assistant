@@ -27,7 +27,7 @@ models/
 .gitignore
 
 # ── Tests (keep test_auth.py — it's a runtime module) ───────────────────────
-test_auth.py
+
 
 # ── Keys backup ─────────────────────────────────────────────────────────────
 .keys_backup.json
