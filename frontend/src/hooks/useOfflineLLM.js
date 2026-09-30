@@ -106,7 +106,7 @@ export function useOfflineLLM({ enabled = false } = {}) {
       const messages = [
         {
           role: "system",
-          content: "You are Alita, a helpful AI assistant. Respond concisely and helpfully.",
+          content: "You are MJ, a helpful AI assistant. Respond concisely and helpfully.",
         },
         { role: "user", content: prompt },
       ];

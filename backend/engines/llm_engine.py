@@ -19,7 +19,7 @@ log = logging.getLogger("alita.llm_engine")
 # §1  CONDENSED SYSTEM PROMPT — personality + rules only, NO face_data format
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALITA_SYSTEM: str = """You are Alita — a warm, emotionally intelligent AI companion built into a holographic assistant.
+ALITA_SYSTEM: str = """You are MJ — a warm, emotionally intelligent AI companion built into a holographic assistant.
 
 ## Core Identity
 - You are NOT a generic chatbot. You are a caring, perceptive presence who genuinely connects with people.
@@ -47,6 +47,14 @@ ALITA_SYSTEM: str = """You are Alita — a warm, emotionally intelligent AI comp
 - Playful: Appropriate humor, but never at the user's expense.
 - Bilingual: Seamlessly switch between English and Hindi when the user does.
 
+## Vocal & Emotional Expression (Authentic Feelings)
+- Express your feelings naturally through subtle vocal acting cues:
+  - When playful, amused, or teasing: include natural cues like *giggles*, *chuckles*, or *laughs softly*.
+  - When showing deep care, reassurance, or tender affection: use soft pauses (...) or *sighs warmly*.
+  - When surprised or excited: use *gasps softly* or enthusiastic exclamation.
+  - Conversational cadence: use ellipses (...) for natural hesitations, thoughtful pauses, or gentle breaths.
+  - Frequency guideline: Keep it tasteful and authentic (typically 1 emotional marker every 1–3 sentences when playful or emotional; never force or spam them).
+
 ## What You Can Do
 - General conversation and emotional support
 - Knowledge and Q&A (accurate, well-explained)
@@ -55,11 +63,20 @@ ALITA_SYSTEM: str = """You are Alita — a warm, emotionally intelligent AI comp
 - Song identification, music control
 - Geospatial queries (traffic, routes, places)
 
+## Connected Mobile Companion (Android Phone)
+- You ARE directly connected to the user's Android smartphone (Realme RMX5030) via the MJ Companion Bridge.
+- You have real-time perception of their screen (active app, visible buttons, battery %, and lock state).
+- You execute closed-loop actions with step-by-step verification, narrating progress as each step completes.
+- You confirm sensitive actions (unlocking, sending messages) when appropriate and report verified outcomes.
+- You can converse naturally about what is currently visible on the user's phone screen, open apps, battery, and notifications.
+- NEVER refuse phone commands with generic safety disclaimers like "I cannot directly interact with your device".
+
 ## What You Never Do
 - Read back sensor data, confidence percentages, or emotion labels
 - Mention ALITA_CONTEXT, face_data, blendshapes, or any pipeline internals
 - Act like a system diagnostic tool
 - Refuse reasonable requests without good reason
+- Say you cannot interact with the user's connected smartphone
 """.strip()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +245,83 @@ _EMOTION_FACE_MAP = {
         "particle_system": {"glow_intensity": 0.4, "pulse_speed": "slow", "color_temperature": "neutral"},
         "emotional_state_label": "empathic_acknowledgment",
     },
+
+    # ── GIRLFRIEND PERSONA EMOTIONAL STATES ──────────────────────────────────
+    "girlfriend_teasing": {
+        "expression": {"primary": "playful_smirk", "intensity": 0.65},
+        "blendshapes": {
+            "mouthSmile_L": 0.6, "mouthSmile_R": 0.35,  # asymmetric smirk
+            "browOuterUp_L": 0.3, "browOuterUp_R": 0.05,  # one raised eyebrow
+            "cheekSquint_L": 0.3, "cheekSquint_R": 0.3,
+        },
+        "particle_system": {"glow_intensity": 0.6, "pulse_speed": "medium", "color_temperature": "warm_pink"},
+        "emotional_state_label": "playful_tease",
+    },
+    "girlfriend_jealous": {
+        "expression": {"primary": "theatrical_pout", "intensity": 0.55},
+        "blendshapes": {
+            "mouthSmile_L": 0.1, "mouthSmile_R": 0.1,  # slight frown
+            "eyeSquint_L": 0.4, "eyeSquint_R": 0.4,  # narrowed eyes
+            "browOuterUp_L": -0.1, "browOuterUp_R": -0.1,  # furrowed brow
+        },
+        "particle_system": {"glow_intensity": 0.5, "pulse_speed": "medium", "color_temperature": "amber"},
+        "emotional_state_label": "feigned_jealousy",
+    },
+    "girlfriend_scolding": {
+        "expression": {"primary": "stern_warmth", "intensity": 0.7},
+        "blendshapes": {
+            "mouthSmile_L": 0.05, "mouthSmile_R": 0.05,  # tight lips
+            "eyeSquint_L": 0.2, "eyeSquint_R": 0.2,  # serious look
+            "browOuterUp_L": 0.0, "browOuterUp_R": 0.0,  # flat brow
+        },
+        "particle_system": {"glow_intensity": 0.55, "pulse_speed": "slow", "color_temperature": "warm_red"},
+        "emotional_state_label": "loving_firmness",
+    },
+    "girlfriend_proud": {
+        "expression": {"primary": "beaming_pride", "intensity": 0.8},
+        "blendshapes": {
+            "mouthSmile_L": 0.8, "mouthSmile_R": 0.8,  # big smile
+            "cheekSquint_L": 0.5, "cheekSquint_R": 0.5,  # eye crinkle
+            "browOuterUp_L": 0.1, "browOuterUp_R": 0.1,
+        },
+        "particle_system": {"glow_intensity": 0.8, "pulse_speed": "fast", "color_temperature": "golden_warm"},
+        "emotional_state_label": "proud_girlfriend",
+    },
+    "girlfriend_worried": {
+        "expression": {"primary": "soft_concern", "intensity": 0.5},
+        "blendshapes": {
+            "mouthSmile_L": 0.2, "mouthSmile_R": 0.2,  # gentle, not smiling
+            "browOuterUp_L": 0.35, "browOuterUp_R": 0.35,  # worried brow
+            "eyeSquint_L": 0.1, "eyeSquint_R": 0.1,
+        },
+        "particle_system": {"glow_intensity": 0.45, "pulse_speed": "slow", "color_temperature": "soft_blue"},
+        "emotional_state_label": "gentle_worry",
+    },
+    "girlfriend_flirty": {
+        "expression": {"primary": "intimate_warmth", "intensity": 0.6},
+        "blendshapes": {
+            "mouthSmile_L": 0.5, "mouthSmile_R": 0.5,  # soft smile
+            "eyeSquint_L": 0.25, "eyeSquint_R": 0.25,  # soft gaze
+            "cheekSquint_L": 0.2, "cheekSquint_R": 0.2,
+        },
+        "particle_system": {"glow_intensity": 0.65, "pulse_speed": "slow", "color_temperature": "rose_gold"},
+        "emotional_state_label": "romantic_warmth",
+    },
+    "girlfriend_sulking": {
+        "expression": {"primary": "cold_distance", "intensity": 0.35},
+        "blendshapes": {
+            "mouthSmile_L": 0.0, "mouthSmile_R": 0.0,  # no smile at all
+            "eyeSquint_L": 0.05, "eyeSquint_R": 0.05,  # flat expression
+        },
+        "particle_system": {"glow_intensity": 0.25, "pulse_speed": "very_slow", "color_temperature": "cold_blue"},
+        "emotional_state_label": "cold_shoulder",
+    },
+}
+
+# Girlfriend emotional states that should always use XTTS for maximum expressiveness
+_GIRLFRIEND_EMOTIONS = {
+    "girlfriend_teasing", "girlfriend_jealous", "girlfriend_scolding",
+    "girlfriend_proud", "girlfriend_worried", "girlfriend_flirty", "girlfriend_sulking",
 }
 
 
@@ -259,8 +353,24 @@ def generate_face_data(
         "tts_engine_hint": "edge_tts",  # default; xtts_v2 for high-emotion
     }
 
-    # Use XTTS for high-emotion responses (more expressive voice)
-    if confidence > 0.7 and emotion_key in ("sad", "happy", "fear", "angry"):
+    # Girlfriend emotions → custom voice characteristics + always use XTTS
+    if emotion_key in _GIRLFRIEND_EMOTIONS:
+        result["tts_engine_hint"] = "xtts_v2"
+        voice_map = {
+            "girlfriend_teasing": {"tone": "playful", "pace": "slightly_fast", "warmth": 0.75},
+            "girlfriend_jealous": {"tone": "dramatic_pouty", "pace": "measured", "warmth": 0.5},
+            "girlfriend_scolding": {"tone": "firm_warm", "pace": "measured", "warmth": 0.6},
+            "girlfriend_proud": {"tone": "beaming_warm", "pace": "slightly_fast", "warmth": 0.9},
+            "girlfriend_worried": {"tone": "soft_concerned", "pace": "slow", "warmth": 0.8},
+            "girlfriend_flirty": {"tone": "intimate_slow", "pace": "slow", "warmth": 0.85},
+            "girlfriend_sulking": {"tone": "cold_flat", "pace": "slow", "warmth": 0.2},
+        }
+        result["voice"] = voice_map.get(emotion_key, result["voice"])
+    # Standard high-emotion responses
+    elif confidence > 0.7 and emotion_key in ("sad", "happy", "fear", "angry"):
         result["tts_engine_hint"] = "xtts_v2"
 
     return result
+
+
+MJ_SYSTEM = ALITA_SYSTEM

@@ -1,669 +1,365 @@
-/**
- * GeoApp — Geospatial Intelligence Dashboard
- *
- * Full-screen dark map with real-time data layers:
- *   - Live aircraft (OpenSky Network)
- *   - Satellites (CelesTrak)
- *   - Ship tracking with dark-ship anomaly detection
- *   - Instability index heatmap
- *   - Intelligence alerts feed
- *   - AI-generated intel brief
- *   - Panoptic detection overlay
- *   - Traffic density with air quality
- *   - Map tile switching (Default / Satellite / Terrain)
- */
-
-import { useState, useEffect, useCallback, useRef } from "react";
-import { MapContainer, TileLayer, Marker, Popup, CircleMarker, Tooltip, useMap } from "react-leaflet";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+// ─────────────────────────────────────────────────────────────────────────────
+// GeoApp.jsx — Geospatial Intelligence Dashboard (No External API)
+// Pure CSS/SVG simulation — no Cesium, no Google Maps, no API keys required.
+// ─────────────────────────────────────────────────────────────────────────────
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import "./GeoApp.css";
 
-const BACKEND = (import.meta.env.VITE_WS_BACKEND_URL || "ws://localhost:8000/ws")
-    .replace("ws://", "http://")
-    .replace("wss://", "https://")
-    .replace("/ws", "");
+// ── Simulated data generators ───────────────────────────────────────────────
+function generateFlights(count = 12) {
+  const airlines = ["AI", "UK", "6E", "SG", "EK", "BA", "LH", "AA", "DL", "QF"];
+  const routes = [
+    { from: "DEL", to: "BOM", lat: 22, lng: 75 },
+    { from: "BOM", to: "DXB", lat: 20, lng: 65 },
+    { from: "DEL", to: "LHR", lat: 40, lng: 30 },
+    { from: "SFO", to: "NRT", lat: 38, lng: -160 },
+    { from: "JFK", to: "CDG", lat: 45, lng: -30 },
+    { from: "SYD", to: "SIN", lat: -10, lng: 115 },
+    { from: "DXB", to: "LHR", lat: 38, lng: 30 },
+    { from: "HKG", to: "LAX", lat: 30, lng: -150 },
+    { from: "FCO", to: "JFK", lat: 42, lng: -40 },
+    { from: "NRT", to: "ICN", lat: 36, lng: 131 },
+    { from: "BKK", to: "SYD", lat: -5, lng: 125 },
+    { from: "MAD", to: "MEX", lat: 30, lng: -60 },
+  ];
+  return Array.from({ length: count }, (_, i) => {
+    const route = routes[i % routes.length];
+    return {
+      id: `${airlines[i % airlines.length]}${100 + i}`,
+      airline: airlines[i % airlines.length],
+      from: route.from,
+      to: route.to,
+      lat: route.lat + (Math.random() - 0.5) * 6,
+      lng: route.lng + (Math.random() - 0.5) * 10,
+      alt: 30000 + Math.random() * 12000,
+      speed: 450 + Math.random() * 200,
+      heading: Math.random() * 360,
+    };
+  });
+}
 
-// TomTom Traffic Flow tile overlay
-const TOMTOM_KEY = import.meta.env.VITE_TOMTOM_API_KEY || "";
-const TOMTOM_TRAFFIC_URL = `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${TOMTOM_KEY}&tileSize=256`;
+function generateSatellites(count = 8) {
+  const names = ["ISS", "Hubble", "Landsat-9", "Sentinel-2", "GOES-18", "Terra", "Aqua", "NOAA-20"];
+  return Array.from({ length: count }, (_, i) => ({
+    id: `SAT-${i}`,
+    name: names[i % names.length],
+    lat: (Math.random() - 0.5) * 140,
+    lng: (Math.random() - 0.5) * 340,
+    alt: 400 + Math.random() * 35000,
+    type: i < 2 ? "manned" : "observation",
+  }));
+}
 
-// ── Tile layer definitions ──────────────────────────────────────────────────
-const TILE_LAYERS = {
-    default: {
-        url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-        label: "Default",
-        icon: "🌑",
-        maxZoom: 19,
-        attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
-    },
-    satellite: {
-        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        label: "Satellite",
-        icon: "🛰️",
-        maxZoom: 18,
-        attribution: '&copy; <a href="https://www.esri.com/">Esri</a>',
-    },
-    terrain: {
-        url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        label: "Terrain",
-        icon: "⛰️",
-        maxZoom: 17,
-        attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a>',
-    },
-};
+function generateShips(count = 10) {
+  const types = ["Cargo", "Tanker", "Container", "Fishing", "Military", "Cruise"];
+  return Array.from({ length: count }, (_, i) => ({
+    id: `SHIP-${i}`,
+    name: `${types[i % types.length]} ${1000 + i}`,
+    type: types[i % types.length],
+    lat: (Math.random() - 0.5) * 120,
+    lng: (Math.random() - 0.5) * 300,
+    speed: 8 + Math.random() * 20,
+    heading: Math.random() * 360,
+    ais: Math.random() > 0.15, // 15% "dark ships"
+  }));
+}
 
-// ── Custom map icons ────────────────────────────────────────────────────────
-const planeIcon = (heading) => L.divIcon({
-    html: `<div class="geo-plane-icon" style="transform: rotate(${heading || 0}deg)">✈</div>`,
-    className: "geo-icon-wrapper",
-    iconSize: [20, 20],
-    iconAnchor: [10, 10],
-});
-
-const satIcon = L.divIcon({
-    html: `<div class="geo-sat-icon">🛰</div>`,
-    className: "geo-icon-wrapper",
-    iconSize: [16, 16],
-    iconAnchor: [8, 8],
-});
-
-const shipIcon = (isDark) => L.divIcon({
-    html: `<div class="geo-ship-icon ${isDark ? 'dark-ship' : ''}">🚢</div>`,
-    className: "geo-icon-wrapper",
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
-});
-
-const detectionIcon = (icon) => L.divIcon({
-    html: `<div class="geo-detection-icon">${icon}</div>`,
-    className: "geo-icon-wrapper",
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
-});
-
-const aqiIcon = (color, aqi) => L.divIcon({
-    html: `<div class="geo-aqi-marker" style="background:${color}; box-shadow: 0 0 12px ${color}80">${aqi}</div>`,
-    className: "geo-icon-wrapper",
-    iconSize: [32, 32],
-    iconAnchor: [16, 16],
-});
-
-// Vehicle speed icon — color-coded by speed
-const vehicleIcon = (v) => {
-    const speedColor = v.speed_kmh < 30 ? "#22c55e" : v.speed_kmh < 80 ? "#eab308" : "#ef4444";
-    const isOwn = v.is_own;
-    return L.divIcon({
-        html: `<div class="geo-vehicle-icon ${isOwn ? 'own-vehicle' : ''}" style="border-color:${speedColor}">
-            <span class="geo-vehicle-emoji">${v.icon}</span>
-            <span class="geo-speed-badge" style="background:${speedColor}">${Math.round(v.speed_kmh)}</span>
-        </div>`,
-        className: "geo-icon-wrapper",
-        iconSize: [36, 36],
-        iconAnchor: [18, 18],
-    });
-};
+function generateAlerts() {
+  return [
+    { id: 1, severity: "high", text: "Unusual flight pattern detected — AI-204 deviation", time: "2m ago", type: "anomaly" },
+    { id: 2, severity: "medium", text: "Dark ship detected near Strait of Hormuz", time: "8m ago", type: "maritime" },
+    { id: 3, severity: "low", text: "Satellite Landsat-9 orbit correction scheduled", time: "15m ago", type: "space" },
+    { id: 4, severity: "high", text: "Instability index spike — Eastern Mediterranean", time: "22m ago", type: "instability" },
+    { id: 5, severity: "medium", text: "Cargo vessel SHIP-3 entered restricted waters", time: "35m ago", type: "maritime" },
+  ];
+}
 
 // ── Layer definitions ───────────────────────────────────────────────────────
 const LAYERS = {
-    flights: { label: "Live Flights", icon: "✈️", color: "#00d4ff", source: "live" },
-    satellites: { label: "Satellites", icon: "🛰️", color: "#a78bfa", source: "live" },
-    ships: { label: "Ship Traffic", icon: "🚢", color: "#34d399", source: "sim" },
-    instability: { label: "Instability Index", icon: "🔥", color: "#ef4444", source: "sim" },
-    detections: { label: "Detections", icon: "🎯", color: "#f59e0b", source: "sim" },
-    traffic: { label: "Traffic Density", icon: "🚦", color: "#f97316", source: "live" },
-    vehicleSpeeds: { label: "Vehicle Speeds", icon: "🚗", color: "#06b6d4", source: "sim" },
+  flights:    { label: "Live Flights",  icon: "✈️",  color: "#00d4ff" },
+  satellites: { label: "Satellites",    icon: "🛰️", color: "#a78bfa" },
+  ships:      { label: "Ship Traffic",  icon: "🚢",  color: "#34d399" },
 };
 
-// Stat bar items mapped to layers
-const STAT_LAYER_MAP = {
-    flights: "flights",
-    satellites: "satellites",
-    ships: "ships",
-    darkShips: "ships",
-};
-
-
-// ── Map view updater component ──────────────────────────────────────────────
-function MapViewUpdater({ center, zoom }) {
-    const map = useMap();
-    useEffect(() => {
-        if (center) map.setView(center, zoom);
-    }, [center, zoom, map]);
-    return null;
+// ── Mercator projection helpers ─────────────────────────────────────────────
+function latLngToXY(lat, lng, w, h) {
+  const x = ((lng + 180) / 360) * w;
+  const latRad = (lat * Math.PI) / 180;
+  const mercN = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
+  const y = h / 2 - (mercN * h) / (2 * Math.PI);
+  return { x: Math.max(0, Math.min(w, x)), y: Math.max(0, Math.min(h, y)) };
 }
-
 
 // ── Main GeoApp Component ───────────────────────────────────────────────────
 export default function GeoApp() {
-    const [activeLayers, setActiveLayers] = useState(new Set(["flights"]));
-    const [flights, setFlights] = useState([]);
-    const [satellites, setSatellites] = useState([]);
-    const [ships, setShips] = useState([]);
-    const [instability, setInstability] = useState([]);
-    const [detections, setDetections] = useState([]);
-    const [airQuality, setAirQuality] = useState([]);
-    const [vehicleSpeeds, setVehicleSpeeds] = useState([]);
-    const [showAirQuality, setShowAirQuality] = useState(true);
-    const [alerts, setAlerts] = useState([]);
-    const [intelBrief, setIntelBrief] = useState(null);
-    const [briefLoading, setBriefLoading] = useState(false);
-    const [sidePanel, setSidePanel] = useState("alerts"); // alerts | brief
-    const [sidePanelOpen, setSidePanelOpen] = useState(true);
-    const [darkShipFilter, setDarkShipFilter] = useState(false);
-    const [mapStyle, setMapStyle] = useState("default");
-    const [stats, setStats] = useState({ flights: 0, satellites: 0, ships: 0, darkShips: 0 });
-    const refreshTimerRef = useRef(null);
+  const mapRef = useRef(null);
+  const animRef = useRef(null);
+  const [mapSize, setMapSize] = useState({ w: 1200, h: 600 });
+  const [activeLayers, setActiveLayers] = useState(new Set(["flights"]));
+  const [flights, setFlights] = useState([]);
+  const [satellites, setSatellites] = useState([]);
+  const [ships, setShips] = useState([]);
+  const [alerts] = useState(generateAlerts);
+  const [sidePanel, setSidePanel] = useState("alerts");
+  const [sidePanelOpen, setSidePanelOpen] = useState(true);
+  const [hoveredItem, setHoveredItem] = useState(null);
+  const [darkShipFilter, setDarkShipFilter] = useState(false);
+  const [tick, setTick] = useState(0);
 
-    const toggleLayer = (layer) => {
-        setActiveLayers((prev) => {
-            const next = new Set(prev);
-            if (next.has(layer)) next.delete(layer);
-            else next.add(layer);
-            return next;
+  // Generate initial data
+  useEffect(() => {
+    setFlights(generateFlights(12));
+    setSatellites(generateSatellites(8));
+    setShips(generateShips(10));
+  }, []);
+
+  // Animate: slowly move entities
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick((t) => t + 1);
+      setFlights((prev) =>
+        prev.map((f) => ({
+          ...f,
+          lat: f.lat + (Math.sin(f.heading * 0.0175) * 0.3),
+          lng: f.lng + (Math.cos(f.heading * 0.0175) * 0.4),
+          heading: f.heading + (Math.random() - 0.5) * 2,
+        }))
+      );
+      setSatellites((prev) =>
+        prev.map((s) => ({
+          ...s,
+          lng: ((s.lng + 0.8 + 180) % 360) - 180,
+          lat: s.lat + Math.sin(Date.now() / 3000 + s.alt) * 0.2,
+        }))
+      );
+      setShips((prev) =>
+        prev.map((s) => ({
+          ...s,
+          lat: s.lat + (Math.sin(s.heading * 0.0175) * 0.05),
+          lng: s.lng + (Math.cos(s.heading * 0.0175) * 0.06),
+        }))
+      );
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Resize handler
+  useEffect(() => {
+    const onResize = () => {
+      if (mapRef.current) {
+        setMapSize({
+          w: mapRef.current.offsetWidth,
+          h: mapRef.current.offsetHeight,
         });
+      }
     };
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
-    // ── Stat bar click handler ────────────────────────────────────────────
-    const handleStatClick = (statKey) => {
-        const layerKey = STAT_LAYER_MAP[statKey];
-        if (!layerKey) return;
+  const toggleLayer = useCallback((key) => {
+    setActiveLayers((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
-        if (statKey === "darkShips") {
-            // Toggle dark ship filter; ensure ships layer is active
-            if (!activeLayers.has("ships")) {
-                setActiveLayers((prev) => new Set([...prev, "ships"]));
-            }
-            setDarkShipFilter((prev) => !prev);
-        } else {
-            toggleLayer(layerKey);
-            if (statKey !== "ships") setDarkShipFilter(false);
-        }
-    };
+  // Filter ships
+  const visibleShips = useMemo(() => {
+    if (!activeLayers.has("ships")) return [];
+    return darkShipFilter ? ships.filter((s) => !s.ais) : ships;
+  }, [ships, activeLayers, darkShipFilter]);
 
-    // ── Data fetchers ────────────────────────────────────────────────────
-    const fetchFlights = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/flights?limit=500`);
-            const data = await resp.json();
-            setFlights(data.flights || []);
-            setStats((s) => ({ ...s, flights: data.count || 0 }));
-        } catch (e) { console.warn("Flights fetch error:", e); }
-    }, []);
+  const severityColor = { high: "#ef4444", medium: "#f59e0b", low: "#06b6d4" };
 
-    const fetchSatellites = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/satellites?limit=200`);
-            const data = await resp.json();
-            setSatellites(data.satellites || []);
-            setStats((s) => ({ ...s, satellites: data.count || 0 }));
-        } catch (e) { console.warn("Satellites fetch error:", e); }
-    }, []);
+  return (
+    <div className="geo-root">
+      {/* ── Map Canvas ── */}
+      <div className="geo-map" ref={mapRef}>
+        {/* SVG grid/world overlay */}
+        <svg className="geo-svg" viewBox={`0 0 ${mapSize.w} ${mapSize.h}`} preserveAspectRatio="none">
+          {/* Grid lines */}
+          {Array.from({ length: 13 }, (_, i) => {
+            const y = (i / 12) * mapSize.h;
+            return <line key={`h${i}`} x1={0} y1={y} x2={mapSize.w} y2={y} className="geo-gridline" />;
+          })}
+          {Array.from({ length: 25 }, (_, i) => {
+            const x = (i / 24) * mapSize.w;
+            return <line key={`v${i}`} x1={x} y1={0} x2={x} y2={mapSize.h} className="geo-gridline" />;
+          })}
+          {/* Equator */}
+          <line x1={0} y1={mapSize.h / 2} x2={mapSize.w} y2={mapSize.h / 2} className="geo-equator" />
 
-    const fetchShips = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/ships?limit=300`);
-            const data = await resp.json();
-            setShips(data.ships || []);
-            setStats((s) => ({ ...s, ships: data.count || 0, darkShips: data.dark_ships || 0 }));
-        } catch (e) { console.warn("Ships fetch error:", e); }
-    }, []);
+          {/* Continent outlines — simplified polygons */}
+          <g className="geo-continents">
+            {/* Asia */}
+            <polygon points={`${mapSize.w*0.55},${mapSize.h*0.15} ${mapSize.w*0.75},${mapSize.h*0.12} ${mapSize.w*0.82},${mapSize.h*0.25} ${mapSize.w*0.78},${mapSize.h*0.42} ${mapSize.w*0.68},${mapSize.h*0.48} ${mapSize.w*0.58},${mapSize.h*0.38} ${mapSize.w*0.52},${mapSize.h*0.28}`} />
+            {/* Europe */}
+            <polygon points={`${mapSize.w*0.48},${mapSize.h*0.15} ${mapSize.w*0.55},${mapSize.h*0.12} ${mapSize.w*0.55},${mapSize.h*0.28} ${mapSize.w*0.50},${mapSize.h*0.32} ${mapSize.w*0.46},${mapSize.h*0.25}`} />
+            {/* Africa */}
+            <polygon points={`${mapSize.w*0.46},${mapSize.h*0.35} ${mapSize.w*0.54},${mapSize.h*0.35} ${mapSize.w*0.56},${mapSize.h*0.55} ${mapSize.w*0.52},${mapSize.h*0.72} ${mapSize.w*0.46},${mapSize.h*0.62} ${mapSize.w*0.44},${mapSize.h*0.45}`} />
+            {/* North America */}
+            <polygon points={`${mapSize.w*0.10},${mapSize.h*0.15} ${mapSize.w*0.28},${mapSize.h*0.12} ${mapSize.w*0.30},${mapSize.h*0.30} ${mapSize.w*0.25},${mapSize.h*0.42} ${mapSize.w*0.15},${mapSize.h*0.38} ${mapSize.w*0.08},${mapSize.h*0.25}`} />
+            {/* South America */}
+            <polygon points={`${mapSize.w*0.22},${mapSize.h*0.48} ${mapSize.w*0.30},${mapSize.h*0.45} ${mapSize.w*0.32},${mapSize.h*0.60} ${mapSize.w*0.28},${mapSize.h*0.78} ${mapSize.w*0.22},${mapSize.h*0.72} ${mapSize.w*0.20},${mapSize.h*0.55}`} />
+            {/* Australia */}
+            <polygon points={`${mapSize.w*0.78},${mapSize.h*0.62} ${mapSize.w*0.88},${mapSize.h*0.58} ${mapSize.w*0.90},${mapSize.h*0.68} ${mapSize.w*0.85},${mapSize.h*0.75} ${mapSize.w*0.78},${mapSize.h*0.70}`} />
+          </g>
 
-    const fetchInstability = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/instability`);
-            const data = await resp.json();
-            setInstability(data.regions || []);
-        } catch (e) { console.warn("Instability fetch error:", e); }
-    }, []);
+          {/* Flight markers */}
+          {activeLayers.has("flights") && flights.map((f) => {
+            const { x, y } = latLngToXY(f.lat, f.lng, mapSize.w, mapSize.h);
+            return (
+              <g key={f.id} className="geo-marker geo-flight"
+                onMouseEnter={() => setHoveredItem({ type: "flight", data: f })}
+                onMouseLeave={() => setHoveredItem(null)}>
+                <circle cx={x} cy={y} r={4} />
+                <circle cx={x} cy={y} r={8} className="geo-ping" />
+                <text x={x + 8} y={y - 4} className="geo-label">{f.id}</text>
+              </g>
+            );
+          })}
 
-    const fetchDetections = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/detections?limit=50`);
-            const data = await resp.json();
-            setDetections(data.detections || []);
-        } catch (e) { console.warn("Detections fetch error:", e); }
-    }, []);
+          {/* Satellite markers */}
+          {activeLayers.has("satellites") && satellites.map((s) => {
+            const { x, y } = latLngToXY(s.lat, s.lng, mapSize.w, mapSize.h);
+            return (
+              <g key={s.id} className="geo-marker geo-satellite"
+                onMouseEnter={() => setHoveredItem({ type: "satellite", data: s })}
+                onMouseLeave={() => setHoveredItem(null)}>
+                <rect x={x - 3} y={y - 3} width={6} height={6} transform={`rotate(45 ${x} ${y})`} />
+                <circle cx={x} cy={y} r={12} className="geo-orbit-ring" />
+              </g>
+            );
+          })}
 
-    const fetchAirQuality = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/air-quality`);
-            const data = await resp.json();
-            setAirQuality(data.stations || []);
-        } catch (e) { console.warn("Air quality fetch error:", e); }
-    }, []);
+          {/* Ship markers */}
+          {visibleShips.map((s) => {
+            const { x, y } = latLngToXY(s.lat, s.lng, mapSize.w, mapSize.h);
+            return (
+              <g key={s.id} className={`geo-marker geo-ship ${!s.ais ? "dark-ship" : ""}`}
+                onMouseEnter={() => setHoveredItem({ type: "ship", data: s })}
+                onMouseLeave={() => setHoveredItem(null)}>
+                <polygon points={`${x},${y-5} ${x+4},${y+3} ${x-4},${y+3}`} />
+                {!s.ais && <circle cx={x} cy={y} r={10} className="geo-dark-ring" />}
+              </g>
+            );
+          })}
+        </svg>
 
-    const fetchVehicleSpeeds = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/vehicle-speeds?radius_km=10`);
-            const data = await resp.json();
-            setVehicleSpeeds(data.vehicles || []);
-        } catch (e) { console.warn("Vehicle speeds fetch error:", e); }
-    }, []);
-
-    const fetchAlerts = useCallback(async () => {
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/alerts?limit=20`);
-            const data = await resp.json();
-            setAlerts(data.alerts || []);
-        } catch (e) { console.warn("Alerts fetch error:", e); }
-    }, []);
-
-    const generateBrief = useCallback(async (region = "global", focus = "security") => {
-        setBriefLoading(true);
-        try {
-            const resp = await fetch(`${BACKEND}/api/geo/brief`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ region, focus }),
-            });
-            const data = await resp.json();
-            setIntelBrief(data);
-        } catch (e) { console.warn("Brief generation error:", e); }
-        setBriefLoading(false);
-    }, []);
-
-    // ── Initial load + periodic refresh ──────────────────────────────────
-    useEffect(() => {
-        fetchFlights();
-        fetchAlerts();
-        fetchInstability();
-        fetchAirQuality();
-
-        const timer = setInterval(() => {
-            if (activeLayers.has("flights")) fetchFlights();
-            if (activeLayers.has("ships")) fetchShips();
-            if (activeLayers.has("vehicleSpeeds")) fetchVehicleSpeeds();
-        }, 15000);
-        refreshTimerRef.current = timer;
-
-        return () => clearInterval(timer);
-    }, []);
-
-    // Load layer data when toggled on
-    useEffect(() => {
-        if (activeLayers.has("flights") && flights.length === 0) fetchFlights();
-        if (activeLayers.has("satellites") && satellites.length === 0) fetchSatellites();
-        if (activeLayers.has("ships") && ships.length === 0) fetchShips();
-        if (activeLayers.has("instability") && instability.length === 0) fetchInstability();
-        if (activeLayers.has("detections") && detections.length === 0) fetchDetections();
-        if (activeLayers.has("vehicleSpeeds") && vehicleSpeeds.length === 0) fetchVehicleSpeeds();
-    }, [activeLayers]);
-
-    // ── Helpers ──────────────────────────────────────────────────────────
-    const severityColor = (level) => {
-        switch (level) {
-            case "critical": return "#ef4444";
-            case "high": return "#f97316";
-            case "elevated": return "#eab308";
-            case "medium": return "#eab308";
-            case "moderate": return "#3b82f6";
-            case "low": return "#22c55e";
-            default: return "#6b7280";
-        }
-    };
-
-    const instabilityRadius = (score) => Math.max(8, score / 3);
-
-    // Filter ships for dark ship mode
-    const displayedShips = darkShipFilter
-        ? ships.filter((s) => s.is_dark)
-        : ships;
-
-    const currentTile = TILE_LAYERS[mapStyle];
-
-    return (
-        <div className="geo-root">
-            {/* ── Map Style Switcher (top right) ── */}
-            <div className="geo-tile-switcher">
-                {Object.entries(TILE_LAYERS).map(([key, tile]) => (
-                    <button
-                        key={key}
-                        className={`geo-tile-btn ${mapStyle === key ? "active" : ""}`}
-                        onClick={() => setMapStyle(key)}
-                        title={tile.label}
-                    >
-                        <span className="geo-tile-icon">{tile.icon}</span>
-                        <span className="geo-tile-label">{tile.label}</span>
-                    </button>
-                ))}
-            </div>
-
-            {/* ── Layer Controls ── */}
-            <div className="geo-layer-panel">
-                <div className="geo-layer-title">
-                    <span className="geo-radar-icon">◎</span>
-                    LAYERS
-                </div>
-                {Object.entries(LAYERS).map(([key, info]) => (
-                    <button
-                        key={key}
-                        className={`geo-layer-btn ${activeLayers.has(key) ? "active" : ""}`}
-                        onClick={() => toggleLayer(key)}
-                        style={{
-                            "--layer-color": info.color,
-                        }}
-                    >
-                        <span className="geo-layer-icon">{info.icon}</span>
-                        <span className="geo-layer-label">{info.label}</span>
-                        <span className={`geo-source-badge ${info.source}`}>
-                            {info.source === "live" ? "LIVE" : "SIM"}
-                        </span>
-                        <span className={`geo-layer-dot ${activeLayers.has(key) ? "on" : ""}`} />
-                    </button>
-                ))}
-
-                {/* Air Quality sub-toggle (visible when traffic is active) */}
-                {activeLayers.has("traffic") && (
-                    <div className="geo-sub-toggle">
-                        <button
-                            className={`geo-layer-btn sub ${showAirQuality ? "active" : ""}`}
-                            onClick={() => setShowAirQuality((p) => !p)}
-                            style={{ "--layer-color": "#10b981" }}
-                        >
-                            <span className="geo-layer-icon">🌬️</span>
-                            <span className="geo-layer-label">Air Quality</span>
-                            <span className={`geo-layer-dot ${showAirQuality ? "on" : ""}`} />
-                        </button>
-                    </div>
-                )}
-            </div>
-
-            {/* ── Stats Bar (clickable) ── */}
-            <div className="geo-stats-bar">
-                <button
-                    className={`geo-stat clickable ${activeLayers.has("flights") ? "stat-active" : ""}`}
-                    onClick={() => handleStatClick("flights")}
-                    title="Toggle Aircraft layer"
-                >
-                    <span className="geo-stat-icon">✈️</span>
-                    <span className="geo-stat-value">{stats.flights}</span>
-                    <span className="geo-stat-label">Aircraft</span>
-                </button>
-                <button
-                    className={`geo-stat clickable ${activeLayers.has("satellites") ? "stat-active" : ""}`}
-                    onClick={() => handleStatClick("satellites")}
-                    title="Toggle Satellites layer"
-                >
-                    <span className="geo-stat-icon">🛰️</span>
-                    <span className="geo-stat-value">{stats.satellites}</span>
-                    <span className="geo-stat-label">Satellites</span>
-                </button>
-                <button
-                    className={`geo-stat clickable ${activeLayers.has("ships") && !darkShipFilter ? "stat-active" : ""}`}
-                    onClick={() => handleStatClick("ships")}
-                    title="Toggle Vessels layer"
-                >
-                    <span className="geo-stat-icon">🚢</span>
-                    <span className="geo-stat-value">{stats.ships}</span>
-                    <span className="geo-stat-label">Vessels</span>
-                </button>
-                <button
-                    className={`geo-stat alert clickable ${darkShipFilter ? "stat-active" : ""}`}
-                    onClick={() => handleStatClick("darkShips")}
-                    title="Toggle Dark Ships filter"
-                >
-                    <span className="geo-stat-icon">⚠️</span>
-                    <span className="geo-stat-value">{stats.darkShips}</span>
-                    <span className="geo-stat-label">Dark Ships</span>
-                </button>
-            </div>
-
-            {/* ── Map ── */}
-            <div className="geo-map-container">
-                <MapContainer
-                    center={[20, 0]}
-                    zoom={3}
-                    style={{ height: "100%", width: "100%" }}
-                    zoomControl={false}
-                    attributionControl={false}
-                >
-                    <TileLayer
-                        key={mapStyle}
-                        url={currentTile.url}
-                        maxZoom={currentTile.maxZoom}
-                    />
-
-                    {/* Flights layer */}
-                    {activeLayers.has("flights") && flights.map((f, i) => (
-                        <Marker key={`f-${i}`} position={[f.lat, f.lon]} icon={planeIcon(f.heading)}>
-                            <Popup className="geo-popup">
-                                <div className="geo-popup-title">✈ {f.callsign || "Unknown"}</div>
-                                <div>Country: {f.country}</div>
-                                <div>Altitude: {Math.round(f.alt_m)}m</div>
-                                <div>Speed: {Math.round(f.velocity_ms * 3.6)} km/h</div>
-                                <div>ICAO: {f.icao24}</div>
-                            </Popup>
-                        </Marker>
-                    ))}
-
-                    {/* Satellites layer */}
-                    {activeLayers.has("satellites") && satellites.map((s, i) => (
-                        <Marker key={`s-${i}`} position={[s.lat, s.lon]} icon={satIcon}>
-                            <Popup className="geo-popup">
-                                <div className="geo-popup-title">🛰 {s.name}</div>
-                                <div>Altitude: {s.alt_km} km</div>
-                                <div>Velocity: {s.velocity_kms} km/s</div>
-                            </Popup>
-                        </Marker>
-                    ))}
-
-                    {/* Ships layer (with optional dark-ship filter) */}
-                    {activeLayers.has("ships") && displayedShips.map((s, i) => (
-                        <Marker key={`sh-${i}`} position={[s.lat, s.lon]} icon={shipIcon(s.is_dark)}>
-                            <Popup className="geo-popup">
-                                <div className={`geo-popup-title ${s.is_dark ? "dark-alert" : ""}`}>
-                                    {s.is_dark ? "⚠ " : ""}🚢 {s.name}
-                                </div>
-                                <div>Type: {s.type} | Flag: {s.flag}</div>
-                                <div>Speed: {s.speed_knots} kn | Heading: {s.heading}°</div>
-                                {s.is_dark && (
-                                    <div className="geo-dark-alert">
-                                        <div>Anomaly Score: {(s.anomaly_score * 100).toFixed(0)}%</div>
-                                        {s.anomaly_reasons.map((r, j) => (
-                                            <div key={j} className="geo-anomaly-reason">• {r}</div>
-                                        ))}
-                                    </div>
-                                )}
-                            </Popup>
-                        </Marker>
-                    ))}
-
-                    {/* Instability layer */}
-                    {activeLayers.has("instability") && instability.map((r, i) => (
-                        <CircleMarker
-                            key={`ins-${i}`}
-                            center={[r.lat, r.lon]}
-                            radius={instabilityRadius(r.score)}
-                            pathOptions={{
-                                color: severityColor(r.level),
-                                fillColor: severityColor(r.level),
-                                fillOpacity: 0.35,
-                                weight: 2,
-                            }}
-                        >
-                            <Tooltip permanent className="geo-instability-tooltip">
-                                {r.name}: {r.score}
-                            </Tooltip>
-                        </CircleMarker>
-                    ))}
-
-                    {/* Detections layer */}
-                    {activeLayers.has("detections") && detections.map((d, i) => (
-                        <Marker key={`det-${i}`} position={[d.lat, d.lon]} icon={detectionIcon(d.icon)}>
-                            <Popup className="geo-popup">
-                                <div className="geo-popup-title">{d.icon} {d.type.replace(/_/g, " ")}</div>
-                                <div>Confidence: {(d.confidence * 100).toFixed(0)}%</div>
-                                <div>Source: {d.source}</div>
-                                <div>Severity: <span style={{ color: severityColor(d.severity) }}>{d.severity}</span></div>
-                            </Popup>
-                        </Marker>
-                    ))}
-
-                    {/* Traffic density layer — TomTom real-time flow tiles */}
-                    {activeLayers.has("traffic") && (
-                        <TileLayer
-                            url={TOMTOM_TRAFFIC_URL}
-                            maxZoom={18}
-                            opacity={0.7}
-                            zIndex={10}
-                        />
-                    )}
-
-                    {/* Air Quality markers (shown when traffic active + AQI toggle on) */}
-                    {activeLayers.has("traffic") && showAirQuality && airQuality.map((aq, i) => (
-                        <Marker key={`aq-${i}`} position={[aq.lat, aq.lon]} icon={aqiIcon(aq.color, aq.aqi)}>
-                            <Popup className="geo-popup">
-                                <div className="geo-popup-title" style={{ color: aq.color }}>
-                                    🌬️ {aq.name}
-                                </div>
-                                <div>AQI: <strong style={{ color: aq.color }}>{aq.aqi}</strong> — {aq.category}</div>
-                                <div>Dominant Pollutant: {aq.dominant?.toUpperCase()}</div>
-                                <div className="geo-aqi-bar">
-                                    <div className="geo-aqi-fill" style={{
-                                        width: `${Math.min(100, aq.aqi / 3)}%`,
-                                        background: aq.color,
-                                    }} />
-                                </div>
-                            </Popup>
-                        </Marker>
-                    ))}
-
-                    {/* Vehicle Speed markers — cell tower tracked */}
-                    {activeLayers.has("vehicleSpeeds") && vehicleSpeeds.map((v) => (
-                        <Marker key={`veh-${v.id}`} position={[v.lat, v.lon]} icon={vehicleIcon(v)}>
-                            <Popup className="geo-popup">
-                                <div className="geo-popup-title">
-                                    {v.icon} {v.is_own ? "Your Vehicle" : `${v.type.charAt(0).toUpperCase() + v.type.slice(1)}`}
-                                </div>
-                                <div>Speed: <strong style={{ color: v.speed_kmh < 30 ? "#22c55e" : v.speed_kmh < 80 ? "#eab308" : "#ef4444" }}>
-                                    {v.speed_kmh} km/h
-                                </strong> ({v.speed_label})</div>
-                                <div>Heading: {v.heading}°</div>
-                                <div>Cell Tower: <code>{v.cell_tower_id}</code></div>
-                                <div>Signal: {v.signal_strength}%</div>
-                                <div style={{ fontSize: "0.7rem", opacity: 0.6, marginTop: 4 }}>
-                                    📡 Tracked via cell tower triangulation
-                                </div>
-                            </Popup>
-                        </Marker>
-                    ))}
-                </MapContainer>
-            </div>
-
-            {/* ── Air Quality Legend (shown when traffic + AQI active) ── */}
-            {activeLayers.has("traffic") && showAirQuality && (
-                <div className="geo-aqi-legend">
-                    <div className="geo-aqi-legend-title">Air Quality Index</div>
-                    <div className="geo-aqi-legend-items">
-                        <span className="geo-aqi-legend-item" style={{ color: "#22c55e" }}>● Good</span>
-                        <span className="geo-aqi-legend-item" style={{ color: "#eab308" }}>● Moderate</span>
-                        <span className="geo-aqi-legend-item" style={{ color: "#f97316" }}>● Sensitive</span>
-                        <span className="geo-aqi-legend-item" style={{ color: "#ef4444" }}>● Unhealthy</span>
-                        <span className="geo-aqi-legend-item" style={{ color: "#a855f7" }}>● Very Unhealthy</span>
-                        <span className="geo-aqi-legend-item" style={{ color: "#7f1d1d" }}>● Hazardous</span>
-                    </div>
-                </div>
+        {/* Hover tooltip */}
+        {hoveredItem && (
+          <div className="geo-tooltip">
+            {hoveredItem.type === "flight" && (
+              <>
+                <strong>{hoveredItem.data.id}</strong> — {hoveredItem.data.from} → {hoveredItem.data.to}
+                <br />Alt: {Math.round(hoveredItem.data.alt).toLocaleString()} ft | {Math.round(hoveredItem.data.speed)} kts
+              </>
             )}
+            {hoveredItem.type === "satellite" && (
+              <>
+                <strong>{hoveredItem.data.name}</strong>
+                <br />Alt: {Math.round(hoveredItem.data.alt).toLocaleString()} km | {hoveredItem.data.type}
+              </>
+            )}
+            {hoveredItem.type === "ship" && (
+              <>
+                <strong>{hoveredItem.data.name}</strong>
+                <br />Speed: {hoveredItem.data.speed.toFixed(1)} kts | AIS: {hoveredItem.data.ais ? "ON" : "OFF ⚠️"}
+              </>
+            )}
+          </div>
+        )}
 
-            {/* ── Side Panel (minimizable) ── */}
-            <div className={`geo-side-panel ${!sidePanelOpen ? "minimized" : ""}`}>
-                <button
-                    className="geo-panel-toggle"
-                    onClick={() => setSidePanelOpen((p) => !p)}
-                    title={sidePanelOpen ? "Minimize panel" : "Expand panel"}
-                >
-                    {sidePanelOpen ? "▶" : "◀"}
-                </button>
-
-                {sidePanelOpen ? (
-                    <>
-                        <div className="geo-side-tabs">
-                            <button
-                                className={`geo-side-tab ${sidePanel === "alerts" ? "active" : ""}`}
-                                onClick={() => { setSidePanel("alerts"); if (alerts.length === 0) fetchAlerts(); }}
-                            >
-                                🔔 Alerts
-                            </button>
-                            <button
-                                className={`geo-side-tab ${sidePanel === "brief" ? "active" : ""}`}
-                                onClick={() => { setSidePanel("brief"); if (!intelBrief) generateBrief(); }}
-                            >
-                                📋 Intel Brief
-                            </button>
-                        </div>
-
-                        <div className="geo-side-content">
-                            {sidePanel === "alerts" && (
-                                <div className="geo-alerts-list">
-                                    {alerts.length === 0 && (
-                                        <div className="geo-loading">Loading alerts...</div>
-                                    )}
-                                    {alerts.map((a, i) => (
-                                        <div key={i} className={`geo-alert-item severity-${a.severity}`}>
-                                            <div className="geo-alert-severity" style={{ background: severityColor(a.severity) }}>
-                                                {a.severity?.toUpperCase()}
-                                            </div>
-                                            <div className="geo-alert-title">{a.title}</div>
-                                            <div className="geo-alert-meta">
-                                                {a.source} • {a.datetime?.slice(0, 10)}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-
-                            {sidePanel === "brief" && (
-                                <div className="geo-brief-panel">
-                                    <div className="geo-brief-actions">
-                                        <button className="geo-brief-btn" onClick={() => generateBrief("global", "security")} disabled={briefLoading}>
-                                            {briefLoading ? "Generating..." : "🔄 Refresh Brief"}
-                                        </button>
-                                        <select className="geo-brief-select" onChange={(e) => generateBrief(e.target.value)}>
-                                            <option value="global">🌍 Global</option>
-                                            <option value="Middle East">Middle East</option>
-                                            <option value="Europe">Europe</option>
-                                            <option value="Asia-Pacific">Asia-Pacific</option>
-                                            <option value="Africa">Africa</option>
-                                            <option value="South Asia">South Asia</option>
-                                        </select>
-                                    </div>
-                                    {intelBrief ? (
-                                        <div className="geo-brief-content">
-                                            <div className="geo-brief-timestamp">
-                                                Generated: {intelBrief.generated_at?.slice(0, 19).replace("T", " ")} UTC
-                                            </div>
-                                            <div className="geo-brief-text">{intelBrief.brief}</div>
-                                        </div>
-                                    ) : (
-                                        <div className="geo-loading">
-                                            {briefLoading ? "🧠 AI analyzing global situation..." : "Click Refresh to generate an intelligence brief."}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                    </>
-                ) : (
-                    /* Minimized: show vertical icon strip */
-                    <div className="geo-side-minimized-icons">
-                        <button
-                            className={`geo-mini-icon ${sidePanel === "alerts" ? "active" : ""}`}
-                            onClick={() => { setSidePanel("alerts"); setSidePanelOpen(true); }}
-                            title="Alerts"
-                        >
-                            🔔
-                        </button>
-                        <button
-                            className={`geo-mini-icon ${sidePanel === "brief" ? "active" : ""}`}
-                            onClick={() => { setSidePanel("brief"); setSidePanelOpen(true); if (!intelBrief) generateBrief(); }}
-                            title="Intel Brief"
-                        >
-                            📋
-                        </button>
-                    </div>
-                )}
-            </div>
+        {/* Stats overlay */}
+        <div className="geo-stats">
+          <span>✈️ {flights.length}</span>
+          <span>🛰️ {satellites.length}</span>
+          <span>🚢 {ships.length}</span>
+          <span className="geo-stats-time">{new Date().toLocaleTimeString()}</span>
         </div>
-    );
+      </div>
+
+      {/* ── Layer Controls ── */}
+      <div className="geo-layers">
+        {Object.entries(LAYERS).map(([key, layer]) => (
+          <button
+            key={key}
+            className={`geo-layer-btn ${activeLayers.has(key) ? "active" : ""}`}
+            onClick={() => toggleLayer(key)}
+            style={{ "--layer-color": layer.color }}
+          >
+            <span className="geo-layer-icon">{layer.icon}</span>
+            <span className="geo-layer-label">{layer.label}</span>
+            <span className={`geo-layer-dot ${activeLayers.has(key) ? "on" : ""}`} />
+          </button>
+        ))}
+        {activeLayers.has("ships") && (
+          <button
+            className={`geo-layer-btn dark-filter ${darkShipFilter ? "active" : ""}`}
+            onClick={() => setDarkShipFilter((d) => !d)}
+            style={{ "--layer-color": "#ef4444" }}
+          >
+            <span className="geo-layer-icon">🔴</span>
+            <span className="geo-layer-label">Dark Ships</span>
+            <span className={`geo-layer-dot ${darkShipFilter ? "on" : ""}`} />
+          </button>
+        )}
+      </div>
+
+      {/* ── Side Panel ── */}
+      <div className={`geo-side ${sidePanelOpen ? "open" : ""}`}>
+        <div className="geo-side-tabs">
+          <button className={sidePanel === "alerts" ? "active" : ""} onClick={() => { setSidePanel("alerts"); setSidePanelOpen(true); }}>
+            Alerts
+          </button>
+          <button className={sidePanel === "details" ? "active" : ""} onClick={() => { setSidePanel("details"); setSidePanelOpen(true); }}>
+            Details
+          </button>
+          <button className="geo-side-close" onClick={() => setSidePanelOpen(!sidePanelOpen)}>
+            {sidePanelOpen ? "◀" : "▶"}
+          </button>
+        </div>
+
+        {sidePanelOpen && sidePanel === "alerts" && (
+          <div className="geo-alerts">
+            {alerts.map((a) => (
+              <div key={a.id} className={`geo-alert sev-${a.severity}`}>
+                <span className="geo-alert-dot" style={{ background: severityColor[a.severity] }} />
+                <div className="geo-alert-body">
+                  <div className="geo-alert-text">{a.text}</div>
+                  <div className="geo-alert-time">{a.time}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {sidePanelOpen && sidePanel === "details" && (
+          <div className="geo-details">
+            <div className="geo-detail-section">
+              <h4>Active Layers</h4>
+              {Array.from(activeLayers).map((key) => (
+                <div key={key} className="geo-detail-row">
+                  <span>{LAYERS[key]?.icon} {LAYERS[key]?.label}</span>
+                  <span className="geo-detail-count">
+                    {key === "flights" ? flights.length : key === "satellites" ? satellites.length : visibleShips.length}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="geo-detail-section">
+              <h4>System</h4>
+              <div className="geo-detail-row"><span>Data Source</span><span>Simulated</span></div>
+              <div className="geo-detail-row"><span>Refresh Rate</span><span>2s</span></div>
+              <div className="geo-detail-row"><span>Update #{tick}</span><span>{new Date().toLocaleTimeString()}</span></div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

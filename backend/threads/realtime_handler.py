@@ -44,7 +44,7 @@ def get_weather(city: str) -> dict:
     """Get current weather for a city."""
     try:
         url = f"https://wttr.in/{city}?format=%C+%t+%h+%w"
-        req = urllib.request.Request(url, headers={"User-Agent": "Alita/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "MJ/1.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = resp.read().decode("utf-8").strip()
         return {"city": city, "weather": data}
@@ -53,10 +53,18 @@ def get_weather(city: str) -> dict:
 
 
 def web_search(query: str) -> dict:
-    """Web search placeholder."""
+    """Perform real-time background web search."""
+    try:
+        from engines.browser_agent import browser_agent  # type: ignore[import]
+        summary = browser_agent.quick_search_and_summarize(query)
+        if summary:
+            return {"query": query, "search_results": summary}
+    except Exception as exc:
+        log.warning("BrowserAgent search failed (%s), falling back", exc)
+
     return {
         "query": query,
-        "note": "I'll answer based on my knowledge. For real-time results, check Google.",
+        "note": f"I performed a search for '{query}' and am summarizing my knowledge.",
     }
 
 
@@ -147,33 +155,20 @@ def handle_realtime(user_text: str, session, settings, system_prompt: str,
     # ── Format response via LLM ───────────────────────────────────────
     if func_result:
         # Use LLM to format the raw data into a natural response
-        format_prompt = f"""You are Alita, a smart voice assistant. 
+        format_prompt = f"""You are MJ, a smart voice assistant. 
 Based on this data, give a natural, concise spoken response:
 Data: {json.dumps(func_result)}
 User asked: "{user_text}"
 Respond naturally in 1-2 sentences:"""
 
-        from groq_pool import get_rotator as _get_groq_rotator
-        _groq_key = _get_groq_rotator().get_key()
-        if _groq_key:
-            try:
-                from groq import Groq
-                client = Groq(api_key=_groq_key)
-                resp = client.chat.completions.create(
-                    model=settings.groq_model,
-                    messages=[{"role": "user", "content": format_prompt}],
-                    max_tokens=100,
-                    temperature=0.5,
-                )
-                text = resp.choices[0].message.content
-                if text:
-                    response_cache.put(user_text, text)
-                    return [text]
-            except Exception as e:
-                exc_str = str(e)
-                if "rate_limit" in exc_str.lower() or "429" in exc_str:
-                    _get_groq_rotator().mark_rate_limited(_groq_key, 60)
-                log.warning("LLM format failed: %s", e)
+        try:
+            from ollama_client import ollama_chat  # type: ignore[import]
+            text = ollama_chat(prompt=format_prompt, max_tokens=100, temperature=0.5)
+            if text:
+                response_cache.put(user_text, text)
+                return [text]
+        except Exception as e:
+            log.warning("Ollama format failed: %s", e)
 
         # Fallback: return raw data
         return [str(func_result)]

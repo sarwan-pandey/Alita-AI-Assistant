@@ -30,11 +30,31 @@ models/
 *.onnx
 *.bin
 *.gguf
+*.safetensors
+*.pt
+*.pth
+*.exe
+*.zip
+*.apk
 piper/
+tts_benchmark/**/models/
 
 # ── User data & training exports ──────────────────
-data/conversations/
-data/training/
+data/
+backend/data/
+*.db
+*.sqlite3
+*.enc
+.memory_key
+/.txt
+scratch/
+backend/@*.txt
+backend/audit_diag.txt
+backend/dev_sprint.txt
+backend/jarvis_status.txt
+backend/sprint_goals.txt
+backend/system_audit.txt
+backend/test_shot.png
 
 # ── Node modules ──────────────────────────────────
 node_modules/
@@ -51,6 +71,8 @@ desktop.ini
 # ── Logs ──────────────────────────────────────────
 *.log
 npm-debug.log*
+logs/
+backend/logs/
 
 # ── Extra safety: explicit .env paths ─────────────
 backend/.env

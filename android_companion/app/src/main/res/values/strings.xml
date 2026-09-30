@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">MJ Companion</string>
+    <string name="accessibility_service_label">MJ Automation Service</string>
+    <string name="accessibility_service_description">Enables MJ AI Assistant on your PC to autonomously navigate applications, execute gestures, type text, and interact with on-screen elements on your phone.</string>
+    <string name="notification_listener_label">MJ Message Bridge</string>
+    <string name="foreground_service_channel_name">MJ Companion Bridge</string>
+    <string name="foreground_service_channel_desc">Maintains real-time connection with MJ Desktop</string>
+</resources>

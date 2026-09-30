@@ -60,9 +60,9 @@ export function useWebSocket({ token, onMessage, enabled }) {
       clearInterval(pingTimer.current);
       console.log("[WS] Closed. Code:", e.code);
 
-      // 4003 = auth rejected — don't retry
-      if (e.code === 4003) {
-        console.warn("[WS] Auth rejected — not retrying.");
+      // 4003 = auth rejected, 4001 = session replaced — don't retry in infinite loop
+      if (e.code === 4003 || e.code === 4001) {
+        console.warn(`[WS] Connection closed with code ${e.code} — stopping retry loop.`);
         return;
       }
 
@@ -94,7 +94,17 @@ export function useWebSocket({ token, onMessage, enabled }) {
       mountedRef.current = false;
       clearTimeout(retryTimer.current);
       clearInterval(pingTimer.current);
-      wsRef.current?.close();
+      if (wsRef.current) {
+        if (wsRef.current.readyState === WebSocket.CONNECTING) {
+          wsRef.current.onopen = null;
+          wsRef.current.onmessage = null;
+          wsRef.current.onerror = null;
+          wsRef.current.onclose = null;
+        }
+        try {
+          wsRef.current.close();
+        } catch (_) {}
+      }
     };
   }, [token, enabled, connect]);
 

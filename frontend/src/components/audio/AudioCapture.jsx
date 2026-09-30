@@ -17,35 +17,62 @@
 
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useSileroVAD } from "../../hooks/useSileroVAD";
+import { audioStreamPlayer } from "../../utils/AudioStreamPlayer";
 
 const SAMPLE_RATE = 16000;
 
 // ── Wake Word Normalizer ─────────────────────────────────────────────────────
 // STT frequently mishears "Alita" as variations below.
 // Only exact known mishearings — no aggressive multi-word patterns.
-const ALITA_MISHEARINGS = [
+const WAKE_MISHEARINGS = [
+  // MJ mishearings
+  /\bm\s*\.?\s*j\b/gi,
+  /\bemjay\b/gi,
+  /\bem\s+jay\b/gi,
+  /\bamjay\b/gi,
+  /\bmjay\b/gi,
+  // Alita legacy mishearings
+  /\blolita\b/gi,
+  /\bloleta\b/gi,
+  /\blolyta\b/gi,
   /\baletta\b/gi,
   /\baleeta\b/gi,
+  /\baleetta\b/gi,
   /\baleta\b/gi,
   /\barita\b/gi,
+  /\barida\b/gi,
   /\belita\b/gi,
+  /\beleta\b/gi,
+  /\belyta\b/gi,
+  /\bellita\b/gi,
   /\balitha\b/gi,
   /\balida\b/gi,
   /\baletha\b/gi,
   /\balyda\b/gi,
   /\balitah\b/gi,
-  /\beleta\b/gi,
   /\balitta\b/gi,
+  /\bolita\b/gi,
+  /\boleeta\b/gi,
+  /\bulita\b/gi,
+  /\ba\s+leader\b/gi,
+  /\ba\s+letter\b/gi,
+  /\ba\s+litre\b/gi,
+  /\ba\s+liter\b/gi,
+  /\bour\s+leader\b/gi,
+  /\bthe\s+leader\b/gi,
+  /\ba\s+lita\b/gi,
+  /\ba\s*lita\b/gi,
 ];
 
 function normalizeWakeWord(text) {
+  if (!text) return text;
   let result = text;
-  for (const pattern of ALITA_MISHEARINGS) {
-    result = result.replace(pattern, "Alita");
+  for (const pattern of WAKE_MISHEARINGS) {
+    result = result.replace(pattern, "MJ");
   }
-  // Compound mishearings (only with greeting prefix to avoid false positives)
-  result = result.replace(/\b(hello|hey|hi)\s+later\b/gi, "$1 Alita");
-  result = result.replace(/\b(hello|hey|hi)\s+a\s+lita\b/gi, "$1 Alita");
+  // Compound mishearings (with greeting / call prefixes)
+  result = result.replace(/\b(hello|hey|hi|ok|okay|listen)\s+(m\s*j|emjay|em\s*jay|mjay|later|leader|letter|litre|liter|lolita|elita|lita|leeta|aleeta|alita)\b/gi, "$1 MJ");
+  result = result.replace(/\b(hello|hey|hi|ok|okay|listen)\s+a\s+(leader|letter|litre|liter|lita)\b/gi, "$1 MJ");
   return result;
 }
 
@@ -64,19 +91,22 @@ export function AudioCapture({
   sendBargeIn,
   sendSpeculativeQuery,
   cancelSpeculative,
+  isOverlay = false,
 }) {
   const [micState, setMicState] = useState("connecting");
   const recognitionRef = useRef(null);
   const ttsPlayingRef = useRef(false);
-  const ttsQueueRef = useRef([]);
-  const ttsAudioCtxRef = useRef(null);
-  const ttsSourceRef = useRef(null);
   const isSpeaking = useRef(false);
   const restartTimeoutRef = useRef(null);
   const lastAlitaTextRef = useRef(""); // what Alita just said (for echo rejection)
   const processingRef = useRef(false); // prevents double-sends while backend is processing
   const lastSentTextRef = useRef(""); // last text sent to backend (anti-repeat)
   const lastSentTimeRef = useRef(0); // timestamp of last sent text
+  // ── AGI: Utterance accumulation (wait for user to finish full instruction) ──
+  const accumulatedFinalRef = useRef(""); // accumulates final transcripts (visual only)
+  const utteranceTimerRef = useRef(null); // delay timer before sending
+  const UTTERANCE_WAIT_MS = 1200; // fallback timer for dictation mode only
+
   const ttsCooldownRef = useRef(0); // timestamp when TTS finished (cooldown period)
   const networkRetryCountRef = useRef(0); // STT network error retry counter
   const networkRetryTimerRef = useRef(null); // STT network error retry timer
@@ -84,6 +114,8 @@ export function AudioCapture({
   // — stale instances check this to avoid restart loops
   const ttsEndTimeRef = useRef(0); // timestamp when TTS finished (for echo gate)
   const appliedLanguageRef = useRef((sttLanguage || "en-IN").toLowerCase());
+  const userSpeakingRef = useRef(false); // only trigger onSpeechStart on transition from silence
+  const bootTimeRef = useRef(Date.now()); // Boot cooldown: ignore STT for first 5s after mount
 
   // ── Barge-in context tracking ─────────────────────────────────────────
   const accumulatedResponseRef = useRef(""); // Alita's full response text so far
@@ -141,28 +173,10 @@ export function AudioCapture({
     enabled,
   });
 
-  useEffect(() => {
-    if (!enabled) {
-      onVoiceActivity?.(0);
-      return;
-    }
-
-    const timer = setInterval(() => {
-      const prob = Math.max(0, Math.min(1, speechProbRef.current || 0));
-      const rms = Math.max(0, Math.min(1, getMicVolume() * 8));
-      const activity = Math.max(prob, rms * 0.7);
-      onVoiceActivity?.(activity);
-    }, 90);
-
-    return () => {
-      clearInterval(timer);
-      onVoiceActivity?.(0);
-    };
-  }, [enabled, getMicVolume, onVoiceActivity, speechProbRef]);
-
   // ── Stop TTS immediately (barge-in) ──────────────────────────────────────
   const stopTTS = useCallback(() => {
-    if (!ttsPlayingRef.current && ttsQueueRef.current.length === 0) return;
+    audioStreamPlayer.interrupt();
+    if (!ttsPlayingRef.current) return;
 
     // ── Send barge-in context to backend ────────────────────────────────
     const partialResponse = accumulatedResponseRef.current || "";
@@ -174,139 +188,79 @@ export function AudioCapture({
       sendBargeInRef.current?.(partialResponse, originalQuery);
     }
 
-    console.log("[TTS] Barge-in — user is speaking, stopping Alita");
-    try {
-      ttsSourceRef.current?.stop();
-    } catch (_) {}
-    ttsSourceRef.current = null;
-    ttsQueueRef.current = [];
+    console.log("[TTS] ⚡ Barge-in triggered — user is speaking, stopping MJ");
     ttsPlayingRef.current = false;
-    processingRef.current = false; // CRITICAL: allow new speech immediately after barge-in
+    processingRef.current = false; // allow new speech immediately
     setMicState("active");
+    onSpeechStartRef.current?.();
   }, []);
 
-  // ── TTS Playback (MP3 from Edge TTS) ────────────────────────────────────
-  const playNextTTSChunk = useCallback(async () => {
-    if (ttsPlayingRef.current || ttsQueueRef.current.length === 0) return;
-    ttsPlayingRef.current = true;
-    setMicState("speaking");
-
-    // DON'T stop speech recognition — keep mic alive for barge-in!
-
-    const chunk = ttsQueueRef.current.shift();
-
-    try {
-      if (!ttsAudioCtxRef.current) {
-        ttsAudioCtxRef.current = new AudioContext();
-        console.log(
-          "[TTS] AudioContext created, state:",
-          ttsAudioCtxRef.current.state,
-        );
-      }
-      const ctx = ttsAudioCtxRef.current;
-
-      if (ctx.state === "suspended") {
-        await ctx.resume();
-      }
-
-      const b64 = chunk.audio_b64;
-      if (!b64) {
-        ttsPlayingRef.current = false;
-        setMicState("active");
-        return;
-      }
-
-      const binary = atob(b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-      const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
-
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      ttsSourceRef.current = source;
-
-      source.onended = () => {
-        clearTimeout(ttsTimeout);
-        ttsPlayingRef.current = false;
-        ttsSourceRef.current = null;
-        if (ttsQueueRef.current.length > 0) {
-          playNextTTSChunk();
-        } else {
-          // ── Energy-adaptive echo gate ──────────────────────────────────
-          // Sample mic RMS right now (while TTS echo is still in the air).
-          // This baseline tells us how loud the bleed is on this specific setup.
-          // If it's near-zero → AEC/headphones are handling it → 0ms gate.
-          // If elevated → short energy-decay gate kicks in (max 300ms).
-          const echoBaseline = getMicVolume();
-          ttsEndTimeRef.current = Date.now();
-          ttsCooldownRef.current = Date.now(); // keep for barge-in compatibility
-          console.log(
-            `[TTS] Ended — echo baseline RMS=${echoBaseline.toFixed(4)}`,
-          );
-          setMicState("active");
-          processingRef.current = false; // CRITICAL: always unlock after TTS finishes
-          // Release echo text memory quickly so user speech isn't blocked
-          setTimeout(() => {
-            lastAlitaTextRef.current = "";
-            // Clear barge-in response tracking — this response cycle is complete
-            accumulatedResponseRef.current = "";
-          }, 800);
-        }
-      };
-
-      const ttsTimeout = setTimeout(() => {
-        ttsPlayingRef.current = false;
-        ttsSourceRef.current = null;
-        setMicState("active");
-      }, 30000);
-
-      source.start();
-      console.log("[TTS] Playing (%.1fs)", audioBuffer.duration);
-    } catch (err) {
-      console.error("[TTS] Playback error:", err);
-      ttsPlayingRef.current = false;
-      ttsSourceRef.current = null;
-      setMicState("active");
-    }
-  }, [getMicVolume]);
-
-  // ── TTS event listener (sentence-level streaming support) ─────────────
+  // ── Global interrupt listener ─────────────────────────────────────────────
   useEffect(() => {
+    const handleInterrupt = () => {
+      stopTTS();
+    };
+    window.addEventListener("MJ:interrupt", handleInterrupt);
+    window.addEventListener("Alita:interrupt", handleInterrupt);
+    return () => {
+      window.removeEventListener("MJ:interrupt", handleInterrupt);
+      window.removeEventListener("Alita:interrupt", handleInterrupt);
+    };
+  }, [stopTTS]);
+
+  useEffect(() => {
+    if (!enabled) {
+      onVoiceActivity?.(0);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      const prob = Math.max(0, Math.min(1, speechProbRef.current || 0));
+      const rms = Math.max(0, Math.min(1, getMicVolume() * 8));
+      const activity = Math.max(prob, rms * 0.7);
+      onVoiceActivity?.(activity);
+
+      // Instant Voice Barge-In: if user speaks while Alita is speaking, stop TTS immediately (<50ms)
+      if (ttsPlayingRef.current && (prob > 0.48 || rms > 0.42)) {
+        stopTTS();
+      }
+    }, 45);
+
+    return () => {
+      clearInterval(timer);
+      onVoiceActivity?.(0);
+    };
+  }, [enabled, getMicVolume, onVoiceActivity, speechProbRef, stopTTS]);
+
+
+  // ── TTS event listener (seamless streaming audio queue) ─────────────
+  useEffect(() => {
+    audioStreamPlayer.options.onStart = () => {
+      ttsPlayingRef.current = true;
+      setMicState("speaking");
+    };
+    audioStreamPlayer.options.onEnd = () => {
+      ttsPlayingRef.current = false;
+      processingRef.current = false;
+      setMicState("active");
+    };
+
     const handler = (e) => {
       const msg = e.detail;
-
-      // Final TTS marker with empty audio — just signals end of stream
       if (msg.is_final && !msg.audio_b64) {
         return;
       }
-
-      // Sentence-indexed chunks: insert in sorted order so sentences
-      // play in sequence even if TTS completes out of order
-      if (msg.sentence_idx !== undefined) {
-        const q = ttsQueueRef.current;
-        // Find insertion point to maintain sentence order
-        let insertAt = q.length;
-        for (let i = q.length - 1; i >= 0; i--) {
-          if (q[i].sentence_idx !== undefined && q[i].sentence_idx > msg.sentence_idx) {
-            insertAt = i;
-          } else {
-            break;
-          }
-        }
-        q.splice(insertAt, 0, msg);
-      } else {
-        ttsQueueRef.current.push(msg);
-      }
-
-      playNextTTSChunk();
+      audioStreamPlayer.enqueueChunk(msg);
     };
+    window.addEventListener("MJ:tts_chunk", handler);
     window.addEventListener("Alita:tts_chunk", handler);
-    return () => window.removeEventListener("Alita:tts_chunk", handler);
-  }, [playNextTTSChunk]);
+    return () => {
+      window.removeEventListener("MJ:tts_chunk", handler);
+      window.removeEventListener("Alita:tts_chunk", handler);
+    };
+  }, []);
 
-  // ── Track what Alita says for echo rejection + barge-in context ─────────
+  // ── Track what MJ says for echo rejection + barge-in context ─────────
   useEffect(() => {
     // Listen for LLM tokens to build echo-rejection text AND barge-in response tracking
     const tokenHandler = (e) => {
@@ -327,8 +281,12 @@ export function AudioCapture({
         }
       }
     };
+    window.addEventListener("MJ:llm_token", tokenHandler);
     window.addEventListener("Alita:llm_token", tokenHandler);
-    return () => window.removeEventListener("Alita:llm_token", tokenHandler);
+    return () => {
+      window.removeEventListener("MJ:llm_token", tokenHandler);
+      window.removeEventListener("Alita:llm_token", tokenHandler);
+    };
   }, []);
 
   // ── Restart speech recognition helper ───────────────────────────────────
@@ -349,9 +307,11 @@ export function AudioCapture({
   const isEcho = useCallback((transcript) => {
     if (!lastAlitaTextRef.current) return false;
 
-    // Skip echo check if TTS ended more than 2s ago — user is truly speaking
+    // Only check echo while TTS is actively playing or within 1.5s of TTS ending
+    // (covers physical room reverb without blocking real user speech 5s later)
+    const isCurrentlyPlaying = ttsPlayingRef.current;
     const msSinceTTS = Date.now() - (ttsEndTimeRef.current || 0);
-    if (msSinceTTS > 2000) return false;
+    if (!isCurrentlyPlaying && msSinceTTS > 1500) return false;
 
     const alitaText = lastAlitaTextRef.current.toLowerCase();
     const userText = transcript.toLowerCase();
@@ -398,6 +358,11 @@ export function AudioCapture({
     };
 
     recognition.onresult = (event) => {
+      // ── Stabilizer: Ignore STT only for first 300ms after mount ──────
+      if (Date.now() - bootTimeRef.current < 300) {
+        return;
+      }
+
       // Any successful result means the network is back — reset retry counter
       networkRetryCountRef.current = 0;
       clearTimeout(networkRetryTimerRef.current);
@@ -428,8 +393,9 @@ export function AudioCapture({
           const speechProb = speechProbRef.current;
           const rmsVol = getMicVolume();
           const looksLikeEcho = isEcho(bargeText);
-          // Lowered thresholds for more responsive interruption
-          const bargeInThreshold = isFallbackRmsRef.current ? 0.03 : 0.35;
+          // Barge-in thresholds — raised fallback from 0.03→0.08 to prevent
+          // speaker bleed-through from triggering false barge-ins
+          const bargeInThreshold = isFallbackRmsRef.current ? 0.08 : 0.35;
           if (speechProb > bargeInThreshold && !looksLikeEcho) {
             console.log(
               `[BARGE-IN] Interrupting Alita (${isInterim ? 'interim' : 'final'}, speechProb=${speechProb.toFixed(3)}, rms=${rmsVol.toFixed(3)}): "${bargeText.slice(0, 60)}"`,
@@ -458,7 +424,8 @@ export function AudioCapture({
       }
 
       // ── ENERGY-ADAPTIVE ECHO GATE ────────────────────────────────────
-      const ECHO_GATE_MAX_MS = 300;
+      // Extended from 300ms to 800ms — speaker resonance can linger in laptop mics
+      const ECHO_GATE_MAX_MS = 800;
       const timeSinceTTS = Date.now() - ttsEndTimeRef.current;
       const withinGateWindow =
         ttsEndTimeRef.current > 0 && timeSinceTTS < ECHO_GATE_MAX_MS;
@@ -486,46 +453,46 @@ export function AudioCapture({
         }
       }
 
-      // Show interim text (visual feedback) + speculative response
-      if (interimTranscript && !ttsPlayingRef.current) {
-        onSpeechStartRef.current?.();
+      // If user speaks while TTS is playing, trigger instantaneous barge-in!
+      if (ttsPlayingRef.current && (interimTranscript.trim() || finalTranscript.trim())) {
+        const candidate = (interimTranscript || finalTranscript).trim();
+        if (!isEcho(candidate)) {
+          stopTTS();
+        }
+      }
+
+      // ── Live Streaming Interim Visual Feedback ─────────────────────────
+      if (interimTranscript) {
+        if (!userSpeakingRef.current) {
+          userSpeakingRef.current = true;
+          onSpeechStartRef.current?.();
+        }
         isSpeaking.current = true;
+
+        // Stream interim text live to UI
+        const cleanedInterim = normalizeWakeWord(interimTranscript.trim());
+        const fullInterimPreview = (accumulatedFinalRef.current ? accumulatedFinalRef.current + " " : "") + cleanedInterim;
+        onTranscriptRef.current?.(fullInterimPreview);
 
         // ── SPECULATIVE PRE-GENERATION ─────────────────────────────────
         // Send interim transcript to backend when it's substantial enough
-        // so the LLM can start generating before the user finishes speaking.
         const interimWords = interimTranscript.trim().split(/\s+/);
         if (interimWords.length >= 4 && !dictationModeRef.current) {
           const interimNorm = interimTranscript.trim().toLowerCase();
-          // Only send if significantly different from last speculative query
           if (interimNorm !== lastSpecTextRef.current) {
             lastSpecTextRef.current = interimNorm;
             clearTimeout(specDebounceRef.current);
             specDebounceRef.current = setTimeout(() => {
-              sendSpecRef.current?.(interimTranscript.trim());
-            }, 300); // debounce 300ms to avoid flooding
+              sendSpecRef.current?.(cleanedInterim);
+            }, 300);
           }
         }
       }
 
-      // ── Process final transcript ────────────────────────────────────
+      // ── Process final transcript (AGI: accumulate before sending) ────
       if (finalTranscript.trim()) {
         lastSpeechTime.current = Date.now();
         const cleaned = normalizeWakeWord(finalTranscript.trim());
-
-        // Short dedup guard: prevent the SAME utterance from being sent twice
-        // within a 2s window (STT often fires multiple finals for one phrase).
-        // This replaces the old processingRef gate which blocked ALL speech.
-        const now_dedup = Date.now();
-        if (now_dedup - lastSentTimeRef.current < 2000 && lastSentTextRef.current) {
-          const prevW = lastSentTextRef.current.toLowerCase().split(/\s+/);
-          const curW = cleaned.toLowerCase().split(/\s+/);
-          const ol = curW.filter(w => prevW.includes(w)).length / Math.max(curW.length, 1);
-          if (ol > 0.85) {
-            console.log("[STT] Dedup: too similar to last send (%.0f%%, %dms ago)", ol * 100, now_dedup - lastSentTimeRef.current);
-            return;
-          }
-        }
 
         if (bestConfidence > 0 && bestConfidence < 0.4) {
           console.log("[STT] Rejected (low confidence):", cleaned);
@@ -536,23 +503,8 @@ export function AudioCapture({
         if (words.length < 1 || cleaned.length < 2) return;
 
         const NOISE_WORDS = new Set([
-          "hmm",
-          "hm",
-          "uh",
-          "um",
-          "ah",
-          "oh",
-          "mm",
-          "mhm",
-          "huh",
-          "eh",
-          "uhh",
-          "umm",
-          "the",
-          "a",
-          "and",
-          "is",
-          "it",
+          "hmm", "hm", "uh", "um", "ah", "oh", "mm", "mhm",
+          "huh", "eh", "uhh", "umm", "the", "a", "and", "is", "it",
         ]);
         if (
           words.length <= 2 &&
@@ -567,73 +519,146 @@ export function AudioCapture({
           return;
         }
 
-        const now = Date.now();
-        const timeSinceLast = now - lastSentTimeRef.current;
-        if (timeSinceLast < 30000 && lastSentTextRef.current) {
-          const prevWords = lastSentTextRef.current.toLowerCase().split(/\s+/);
-          const curWords = cleaned.toLowerCase().split(/\s+/);
-          const overlap = curWords.filter((w) => prevWords.includes(w)).length;
-          const similarity = overlap / Math.max(curWords.length, 1);
-          if (similarity > 0.5) {
-            console.log(
-              "[STT] Rejected (anti-repeat, %.0f%% similar, %ds ago):",
-              similarity * 100,
-              (timeSinceLast / 1000).toFixed(0),
-              cleaned.slice(0, 40),
-            );
-            return;
-          }
+        // ── HYBRID STT: Accumulate Web Speech text for visual display only ──
+        // The actual transcript will come from Groq Whisper via the backend.
+        // Web Speech interim/final text is kept for: (a) visual feedback,
+        // (b) fallback if Whisper fails, (c) dictation mode.
+        if (accumulatedFinalRef.current) {
+          accumulatedFinalRef.current += " " + cleaned;
+        } else {
+          accumulatedFinalRef.current = cleaned;
         }
+        console.log("[STT] Accumulated (visual):", accumulatedFinalRef.current);
 
-        console.log("[STT] ✓ Accepted:", cleaned);
-        isSpeaking.current = false;
-        lastAlitaTextRef.current = "";
+        if (!userSpeakingRef.current) {
+          userSpeakingRef.current = true;
+          onSpeechStartRef.current?.();
+        }
+        isSpeaking.current = true;
 
-        // Cancel any pending speculative query — the real query is being sent
-        clearTimeout(specDebounceRef.current);
-        cancelSpecRef.current?.();
-        lastSpecTextRef.current = "";
-
-        // Track the user's query for barge-in context
-        lastUserQueryRef.current = cleaned;
-
-        // ── DICTATION MODE: route to app instead of chat ────────────
+        // ── DICTATION MODE: still uses Web Speech text directly ─────
+        // (dictation needs instant typing, can't wait for Whisper)
         if (dictationModeRef.current) {
-          const lower = cleaned.toLowerCase();
-          if (
-            lower.includes("stop dictating") ||
-            lower.includes("stop writing") ||
-            lower.includes("done writing") ||
-            lower.includes("band karo") ||
-            lower === "stop" ||
-            lower === "done"
-          ) {
-            console.log("[Dictation] Stop command detected");
-            onDictationStopRef.current?.();
+          clearTimeout(utteranceTimerRef.current);
+          utteranceTimerRef.current = setTimeout(() => {
+            const fullText = (accumulatedFinalRef.current || "").trim();
+            accumulatedFinalRef.current = "";
+            if (!fullText) return;
+
+            const lower = fullText.toLowerCase();
+            if (
+              lower.includes("stop dictating") ||
+              lower.includes("stop writing") ||
+              lower.includes("done writing") ||
+              lower.includes("band karo") ||
+              lower === "stop" ||
+              lower === "done"
+            ) {
+              onDictationStopRef.current?.();
+              processingRef.current = false;
+              setMicState("active");
+              return;
+            }
+            sendDictationRef.current?.(fullText);
             processingRef.current = false;
-            setMicState("active");
-            return;
-          }
-          console.log("[Dictation] Typing:", cleaned);
-          sendDictationRef.current?.(cleaned);
-          processingRef.current = false;
-          setMicState("dictating");
+            setMicState("dictating");
+          }, UTTERANCE_WAIT_MS);
           return;
         }
 
-        // ── NORMAL MODE: send to chat ──────────────────────────────
-        onTranscriptRef.current?.(cleaned);
-        onUtteranceCommittedRef.current?.(cleaned);
-        setMicState("processing");
-        lastSentTextRef.current = cleaned;
-        lastSentTimeRef.current = Date.now();
+        // ── NORMAL MODE: Send Web Speech text DIRECTLY (no audio chunks) ──
+        // Web Speech gives us text instantly. Send it to the backend
+        // as a text message — no audio recording/encoding/transfer needed.
+        clearTimeout(utteranceTimerRef.current);
 
-        // Brief visual "processing" state (600ms), then back to active
-        setTimeout(() => {
-          if (!ttsPlayingRef.current) {
-            setMicState("active");
+        // Calculate dynamic silence delay based on prosody, syntax, and sentence completeness
+        // Calibrated for natural speech: average conversational pause = 600-800ms
+        const calculateDynamicDelay = (text) => {
+          if (!text) return 700;
+          const trimmed = text.trim();
+          const lower = trimmed.toLowerCase();
+          const words = lower.split(/\s+/).filter(Boolean);
+
+          // 1. Terminal punctuation (explicit sentence completion)
+          if (/[.!?]$/.test(trimmed)) {
+            return 350;
           }
-        }, 600);
+
+          // 2. Fast single/two-word commands & affirmations (200ms fast path)
+          const FAST_COMMANDS = new Set([
+            "yes", "yeah", "yep", "no", "nope", "stop", "cancel", "pause", "resume",
+            "ok", "okay", "mj", "alita", "haan", "nahi", "ruk", "ruko", "theek hai",
+            "open chrome", "open notepad", "open vscode", "close this", "maximize",
+            "minimize", "mute", "unmute", "next", "previous", "reload", "help",
+            "screenshot", "time", "date", "weather", "what time", "play music"
+          ]);
+          if (words.length <= 2 && FAST_COMMANDS.has(lower)) {
+            return 200;
+          }
+
+          // 3. Trailing conjunctions / connective particles / thought fillers (1200ms extension)
+          const INCOMPLETE_CONNECTORS = new Set([
+            // English
+            "and", "to", "because", "then", "or", "so", "with", "for", "that", "but",
+            "if", "when", "while", "where", "which", "um", "uh", "like", "also", "plus",
+            // Hindi / Hinglish
+            "ki", "aur", "toh", "lekin", "par", "ya", "kyunki", "phir", "karke", "bhi",
+            "wala", "wali", "wale", "ke", "ka", "se", "mein", "pe"
+          ]);
+          const lastWord = words[words.length - 1];
+          if (INCOMPLETE_CONNECTORS.has(lastWord)) {
+            return 1200; // Give user ample time to finish thought without cutting off
+          }
+
+          // 4. Short complete sentences (3-5 words)
+          if (words.length <= 5) {
+            return 700;
+          }
+
+          // 5. Standard multi-word sentences
+          return 900;
+        };
+
+        const dynamicDelay = calculateDynamicDelay(accumulatedFinalRef.current);
+        console.log(`[STT] Turn-taking timer scheduled (${dynamicDelay}ms): "${(accumulatedFinalRef.current || "").slice(0, 40)}"`);
+
+        // Dynamically scheduled commit timer
+        utteranceTimerRef.current = setTimeout(() => {
+          const fullText = (accumulatedFinalRef.current || "").trim();
+          accumulatedFinalRef.current = "";
+          if (!fullText) return;
+
+          // Anti-duplicate: don't resend the same thing within 3s
+          const now = Date.now();
+          if (
+            fullText.toLowerCase() === lastSentTextRef.current.toLowerCase() &&
+            now - lastSentTimeRef.current < 3000
+          ) {
+            console.log("[STT] Skipped duplicate:", fullText.slice(0, 30));
+            return;
+          }
+
+          lastSentTextRef.current = fullText;
+          lastSentTimeRef.current = now;
+
+          console.log("[STT] ⚡ Sending text directly:", fullText.slice(0, 60));
+
+          // Cancel speculative queries
+          clearTimeout(specDebounceRef.current);
+          cancelSpecRef.current?.();
+          lastSpecTextRef.current = "";
+
+          // Send as TEXT directly (not audio!)
+          userSpeakingRef.current = false;
+          onUtteranceCommittedRef.current?.(fullText);
+          processingRef.current = true;
+          setMicState("processing");
+
+          // Force-restart recognition session to prevent Chrome's ~36s
+          // continuous mode hang. onend → _restartRecognition() fires
+          // automatically, creating a fresh session in ~300ms.
+          try { recognitionRef.current?.stop(); } catch (_) {}
+        }, dynamicDelay);
       }
     };
 
@@ -694,12 +719,21 @@ export function AudioCapture({
   }, [_restartRecognition, isEcho, stopTTS, getMicVolume, isFallbackRmsRef, speechProbRef]);
 
   // ── Auto-start when enabled ─────────────────────────────────────────────
-  // startWebSpeech is now stable (no prop deps), so this only fires when
-  // `enabled` truly changes — no more spurious restarts.
+  // PRIMARY: Web Speech API (instant text — no audio transfer needed)
+  // FALLBACK: VAD + Groq Whisper (only if Web Speech unavailable)
   useEffect(() => {
     if (enabled) {
-      const success = startWebSpeech();
-      if (!success) setMicState("error");
+      const started = startWebSpeech();
+      if (started) {
+        setMicState("active");
+        console.log("[STT] Web Speech API mode — instant text, zero latency");
+      } else {
+        // Fallback to VAD + Whisper if Web Speech not available
+        setMicState("active");
+        console.log("[STT] Fallback: Groq Whisper mode — VAD listening");
+      }
+    } else {
+      setMicState("off");
     }
     return () => {
       clearTimeout(restartTimeoutRef.current);
@@ -708,6 +742,27 @@ export function AudioCapture({
       } catch (_) {}
     };
   }, [enabled, startWebSpeech]);
+
+  // ── Voice Activity Feedback (Silero VAD) ─────────────────────────────
+  // Pure visual presence & speech-start trigger (orb pulse, glow effect).
+  // Zero MediaRecorder interference, zero audio chunk uploading.
+  useEffect(() => {
+    if (!enabled) return;
+    const VAD_CHECK_MS = 100;
+    const SPEECH_THRESHOLD = 0.35;
+
+    const vadPollTimer = setInterval(() => {
+      const prob = speechProbRef.current || 0;
+      const isSpeechNow = prob >= SPEECH_THRESHOLD;
+
+      if (isSpeechNow && !userSpeakingRef.current && !ttsPlayingRef.current) {
+        userSpeakingRef.current = true;
+        onSpeechStartRef.current?.();
+      }
+    }, VAD_CHECK_MS);
+
+    return () => clearInterval(vadPollTimer);
+  }, [enabled, speechProbRef]);
 
   // ── Music / ambient audio detection ─────────────────────────────────────
   useEffect(() => {
@@ -1198,7 +1253,7 @@ export function AudioCapture({
     : micState === "active"
       ? "listening"
       : micState === "speaking"
-        ? "alita is speaking · say 'stop' or press Esc"
+        ? "MJ is speaking · say 'stop' or press Esc"
         : micState === "dictating"
           ? `dictating into ${dictationMode?.app || "app"}`
           : micState === "processing"
@@ -1226,6 +1281,11 @@ export function AudioCapture({
     Typing: "⌨️",
     Laughter: "😂",
   };
+
+  // Pure overlay mode: audio capture and STT work 100% in background without any visual DOM artifacts
+  if (isOverlay) {
+    return null;
+  }
 
   return (
     <>

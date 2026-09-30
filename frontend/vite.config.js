@@ -23,6 +23,13 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "credentialless",
     },
   },
+  resolve: {
+    // Dedupe three.js — ensures react-globe.gl → globe.gl → three-globe
+    // all share the SAME three instance (no duplicate warnings).
+    // NOTE: Do NOT use alias: { three: path.resolve(...) } — that breaks
+    // subpath exports like three/webgpu and three/tsl.
+    dedupe: ["three"],
+  },
   optimizeDeps: {
     exclude: [
       "@mediapipe/tasks-vision",

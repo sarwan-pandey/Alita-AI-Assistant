@@ -14,9 +14,10 @@ import os
 import json
 import time
 import logging
+import re as _re_prefs
 from datetime import datetime, timedelta
 from collections import deque
-from typing import Optional
+from typing import Optional, NamedTuple
 
 log = logging.getLogger("alita.personality")
 
@@ -226,6 +227,13 @@ SER_EMOTION_MAP = {
     "fear": "fear", "fearful": "fear",
 }
 
+
+# ── Fix #21: Lightweight emotion entry (NamedTuple vs dict — 3x less memory) ──
+class EmotionEntry(NamedTuple):
+    label: str
+    confidence: float
+    time: float
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PROACTIVE PATTERNS — time-based and habit-based suggestions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,11 +280,11 @@ class PersonalityState:
         """Update current emotion and history."""
         self.current_emotion = label
         self.emotion_confidence = confidence
-        self.emotion_history.append({
-            "label": label,
-            "confidence": confidence,
-            "time": time.time(),
-        })
+        self.emotion_history.append(EmotionEntry(
+            label=label,
+            confidence=confidence,
+            time=time.time(),
+        ))
         self.last_interaction = time.time()
         self.interaction_count += 1
         # Update conversation mood (weighted recent bias)
@@ -300,7 +308,7 @@ class PersonalityState:
         history = list(self.emotion_history)[-10:]  # type: ignore[index]
         for i, entry in enumerate(history):
             weight = 0.5 + (i / len(history)) * 0.5  # 0.5→1.0 (newer = heavier)
-            label = entry["label"]
+            label = entry.label
             counts[label] = counts.get(label, 0) + weight
 
         # Dominant emotion = conversation mood
@@ -321,6 +329,11 @@ class PersonalityState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PREFS_DIR = os.path.join(".", "data", "preferences")
+
+
+# ── Fix #9: TTL cache for user preferences (avoids disk I/O every prompt) ──
+_PREFS_CACHE: dict[str, tuple[float, dict]] = {}  # user_id → (expires_at, prefs)
+_PREFS_CACHE_TTL = 30.0  # seconds
 
 
 def save_preference(user_id: str, category: str, key: str, value: str):
@@ -349,17 +362,29 @@ def save_preference(user_id: str, category: str, key: str, value: str):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(prefs, f, indent=2, ensure_ascii=False)
 
+    # Invalidate cache on write
+    _PREFS_CACHE.pop(user_id, None)
+
     log.info("Preference saved: user=%s %s.%s = %s", user_id, category, key, value[:50])  # type: ignore[index]
 
 
 def load_preferences(user_id: str) -> dict:
-    """Load all preferences for a user."""
+    """Load all preferences for a user (cached with 30s TTL)."""
+    # Check cache first
+    now = time.time()
+    cached = _PREFS_CACHE.get(user_id)
+    if cached and cached[0] > now:
+        return cached[1]
+
     filepath = os.path.join(_PREFS_DIR, f"{user_id}.json")
     if not os.path.exists(filepath):
+        _PREFS_CACHE[user_id] = (now + _PREFS_CACHE_TTL, {})
         return {}
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
+            prefs = json.load(f)
+        _PREFS_CACHE[user_id] = (now + _PREFS_CACHE_TTL, prefs)
+        return prefs
     except Exception:
         return {}
 
@@ -536,7 +561,7 @@ def _detect_escalation(state: PersonalityState) -> str | None:
 
     recent = list(state.emotion_history)[-5:]  # type: ignore[index]
     negative_emotions = {'sad', 'angry', 'fear', 'depressed', 'anxious', 'overwhelmed', 'panicked', 'grieving', 'lonely'}
-    negative_count = sum(1 for e in recent if e.get('label', '') in negative_emotions)
+    negative_count = sum(1 for e in recent if e.label in negative_emotions)
 
     if negative_count >= 4:
         return (
@@ -556,7 +581,7 @@ def _detect_escalation(state: PersonalityState) -> str | None:
 def build_personality_prompt(
     state: PersonalityState,
     user_id: str,
-    custom_name: str = "Alita",
+    custom_name: str = "MJ",
     memory_context: str = "",
     user_text: str = "",
 ) -> str:
@@ -574,7 +599,7 @@ def build_personality_prompt(
       - User preferences (learned over time)
       - Memory context (ChromaDB recall)
     """
-    name = custom_name or "Alita"
+    name = custom_name or "MJ"
     now = datetime.now()
     hour = now.hour
 
@@ -716,6 +741,15 @@ def build_personality_prompt(
         "LANGUAGE: English input → pure English only. Hindi/Hinglish → Devanagari only. Never mix.\n\n"
     )
 
+    # ── Girlfriend Persona & Relationship State ───────────────────────────
+    try:
+        from engines.relationship_manager import relationship_manager
+        gf_directives = relationship_manager.get_personality_directives()
+        if gf_directives:
+            prompt += f"{gf_directives}\n\n"
+    except Exception:
+        pass
+
     # ── Response style (optimized for speed) ──────────────────────────────
     prompt += (
         "RESPONSE STYLE (voice — be fast but human):\n"
@@ -757,26 +791,43 @@ _PREF_PATTERNS = {
         r"(?:i\s+love|i\s+like|mujhe\s+pasand)\s+(?:listening\s+to\s+)?(.+?)\s+(?:music|songs?|gaane)",
     ],
     "name": [
-        r"(?:my\s+name\s+is|mera\s+naam)\s+(\w+)",
-        r"(?:call\s+me|i'm)\s+(\w+)",
+        r"(?:my\s+name\s+is|mera\s+naam\s+hai|mera\s+naam)\s+([a-zA-Z]+)",
+        r"(?:you\s+can\s+call\s+me|call\s+me)\s+([a-zA-Z]+)",
     ],
+}
+
+
+# ── Fix #10: Pre-compiled preference extraction patterns ──
+_COMPILED_PREF_PATTERNS: dict[str, list] = {}
+for _pkey, _pats in _PREF_PATTERNS.items():
+    _COMPILED_PREF_PATTERNS[_pkey] = [_re_prefs.compile(p, _re_prefs.IGNORECASE) for p in _pats]
+
+_INVALID_NAMES = {
+    "the", "a", "an", "is", "it", "sad", "happy", "tired", "bored", "fine", "good",
+    "sorry", "here", "done", "okay", "ok", "ready", "sick", "hungry", "back", "leaving",
+    "busy", "free", "late", "just", "not", "also", "so", "too", "very", "anxious",
+    "depressed", "confused", "curious", "interested", "trying", "going", "feeling",
+    "working", "looking", "watching", "listening", "waiting", "wondering", "asking",
+    "thinking", "saying", "telling", "alita", "mj", "aura", "assistant"
 }
 
 
 def extract_preferences(user_text: str, user_id: str):
     """
     Scan user text for preference declarations and auto-save them.
-    Runs on every user message (fast regex — no overhead).
+    Runs on every user message (fast pre-compiled regex — no overhead).
     """
-    import re
     text = user_text.lower().strip()
 
-    for key, patterns in _PREF_PATTERNS.items():
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+    for key, compiled_patterns in _COMPILED_PREF_PATTERNS.items():
+        for pattern in compiled_patterns:
+            match = pattern.search(text)
             if match:
                 value = match.group(1).strip().capitalize()
-                # Don't save noise words
-                if value and len(value) > 1 and value.lower() not in {"the", "a", "is", "it"}:
+                # Don't save noise words or emotions as names
+                val_lower = value.lower()
+                if key == "name" and val_lower in _INVALID_NAMES:
+                    continue
+                if value and len(value) > 1 and val_lower not in {"the", "a", "is", "it"}:
                     save_preference(user_id, "personal", key, value)
                     log.info("Auto-learned preference: %s = %s", key, value)

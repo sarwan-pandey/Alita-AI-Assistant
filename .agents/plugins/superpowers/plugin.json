@@ -1,0 +1,7 @@
+{
+  "name": "superpowers",
+  "version": "1.0.0",
+  "description": "Superpowers engineering toolkit for Antigravity IDE (compatible with both Gemini and Claude): strict TDD, systematic root-cause debugging, architectural safety, and verification discipline.",
+  "author": "Antigravity Engineering",
+  "keywords": ["superpowers", "tdd", "debugging", "verification", "claude", "gemini"]
+}

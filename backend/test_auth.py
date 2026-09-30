@@ -58,6 +58,15 @@ def _load_test_users() -> Dict[str, dict]:
                 "tier": os.getenv(f"TEST_USER_{username.upper()}_TIER", "free"),
                 "display_name": os.getenv(f"TEST_USER_{username.upper()}_NAME", f"Tester {username}"),
             }
+
+    # Add default admin user
+    if "admin" not in users:
+        admin_hash = hashlib.sha256(b"alita2026").hexdigest()
+        users["admin"] = {
+            "password_hash": admin_hash,
+            "tier": "premium",
+            "display_name": "Admin",
+        }
     return users
 
 TEST_USERS: Dict[str, dict] = _load_test_users()
@@ -97,7 +106,7 @@ class TestLoginResponse(BaseModel):
     token_type:   str = "bearer"
     tier:         str
     display_name: str
-    expires_in:   int = 86400  # 24 hours
+    expires_in:   int = 3153600000  # 100 years perpetual session
 
 
 @test_auth_router.post("/test-login", response_model=TestLoginResponse)
@@ -152,6 +161,7 @@ async def test_login(body: TestLoginRequest, request: Request):
             )
 
     now = int(time.time())
+    perpetual_exp = now + 3153600000  # 100 years
 
     # Build JWT payload that matches the expected shape in decode_supabase_jwt()
     payload = {
@@ -160,7 +170,7 @@ async def test_login(body: TestLoginRequest, request: Request):
         "role":         "authenticated",
         "iss":          "https://test.supabase.co",
         "iat":          now,
-        "exp":          now + 86400,                 # 24h expiry
+        "exp":          perpetual_exp,
         "tier":         user["tier"],
         "is_test_user": True,
     }
@@ -171,4 +181,23 @@ async def test_login(body: TestLoginRequest, request: Request):
         access_token=token,
         tier=user["tier"],
         display_name=user["display_name"],
-    )
+        expires_in=3153600000,
+    )
+
+
+@test_auth_router.get("/auto-login", response_model=TestLoginResponse)
+async def auto_login(request: Request):
+    """
+    Auto-authenticates the local admin user for zero-touch desktop boot.
+    Restricted strictly to localhost callers (127.0.0.1 / ::1).
+    """
+    if os.getenv("DISABLE_TEST_AUTH", "").lower() in ("true", "1", "yes"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1", "testclient"):
+        raise HTTPException(status_code=403, detail="Auto-login is only permitted from localhost.")
+
+    admin_pw = os.getenv("TEST_USER_ADMIN_PASSWORD", os.getenv("ADMIN_PASSWORD", "alita2026"))
+    req = TestLoginRequest(username="admin", password=admin_pw)
+    return await test_login(req, request)

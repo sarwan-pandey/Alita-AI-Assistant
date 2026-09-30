@@ -70,7 +70,49 @@ export function useContextAwareness({ enabled = false } = {}) {
     }
 
     let batteryRef = null;
+    let checkBatteryRef = null;
     let intervalId = null;
+
+    // ── Network monitoring ────────────────────────────────────────
+    const handleOnline = () => {
+      if (!mountedRef.current) return;
+      if (alertedRef.current.offline) {
+        alertedRef.current.offline = false;
+        dispatch("network_restored", {
+          message: "📶 Network connection restored",
+        });
+      }
+      lastContextRef.current.online = true;
+    };
+
+    const handleOffline = () => {
+      if (!mountedRef.current) return;
+      alertedRef.current.offline = true;
+      dispatch("network_lost", {
+        message: "📡 Network connection lost — some features may be limited",
+      });
+      lastContextRef.current.online = false;
+    };
+
+    // ── Page visibility ───────────────────────────────────────────
+    const handleVisibility = () => {
+      if (!mountedRef.current) return;
+      const hidden = document.hidden;
+      if (hidden !== lastContextRef.current.hidden) {
+        lastContextRef.current.hidden = hidden;
+        dispatch("visibility_change", {
+          hidden,
+          message: hidden
+            ? "User switched away from tab"
+            : "User returned to tab",
+        });
+      }
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    lastContextRef.current.online = typeof navigator !== "undefined" ? navigator.onLine : true;
+    document.addEventListener("visibilitychange", handleVisibility);
 
     async function init() {
       // ── Initial greeting based on time ────────────────────────────
@@ -86,8 +128,9 @@ export function useContextAwareness({ enabled = false } = {}) {
 
       // ── Battery API ──────────────────────────────────────────────
       try {
-        if ("getBattery" in navigator) {
+        if (typeof navigator !== "undefined" && "getBattery" in navigator) {
           const battery = await navigator.getBattery();
+          if (!mountedRef.current) return;
           batteryRef = battery;
 
           const checkBattery = () => {
@@ -127,6 +170,7 @@ export function useContextAwareness({ enabled = false } = {}) {
             lastContextRef.current.charging = charging;
           };
 
+          checkBatteryRef = checkBattery;
           battery.addEventListener("levelchange", checkBattery);
           battery.addEventListener("chargingchange", checkBattery);
           checkBattery();
@@ -134,47 +178,6 @@ export function useContextAwareness({ enabled = false } = {}) {
       } catch (_) {
         // Battery API not available
       }
-
-      // ── Network monitoring ────────────────────────────────────────
-      const handleOnline = () => {
-        if (!mountedRef.current) return;
-        if (alertedRef.current.offline) {
-          alertedRef.current.offline = false;
-          dispatch("network_restored", {
-            message: "📶 Network connection restored",
-          });
-        }
-        lastContextRef.current.online = true;
-      };
-
-      const handleOffline = () => {
-        if (!mountedRef.current) return;
-        alertedRef.current.offline = true;
-        dispatch("network_lost", {
-          message: "📡 Network connection lost — some features may be limited",
-        });
-        lastContextRef.current.online = false;
-      };
-
-      window.addEventListener("online", handleOnline);
-      window.addEventListener("offline", handleOffline);
-      lastContextRef.current.online = navigator.onLine;
-
-      // ── Page visibility ───────────────────────────────────────────
-      const handleVisibility = () => {
-        if (!mountedRef.current) return;
-        const hidden = document.hidden;
-        if (hidden !== lastContextRef.current.hidden) {
-          lastContextRef.current.hidden = hidden;
-          dispatch("visibility_change", {
-            hidden,
-            message: hidden
-              ? "User switched away from tab"
-              : "User returned to tab",
-          });
-        }
-      };
-      document.addEventListener("visibilitychange", handleVisibility);
 
       // ── Periodic checks ───────────────────────────────────────────
       intervalId = setInterval(() => {
@@ -201,7 +204,7 @@ export function useContextAwareness({ enabled = false } = {}) {
         }
 
         // Network info (if available)
-        if ("connection" in navigator) {
+        if (typeof navigator !== "undefined" && "connection" in navigator) {
           const conn = navigator.connection;
           if (conn?.effectiveType === "2g" || conn?.effectiveType === "slow-2g") {
             dispatch("slow_network", {
@@ -214,10 +217,10 @@ export function useContextAwareness({ enabled = false } = {}) {
 
       // Log device info once
       const deviceInfo = {
-        memory: navigator.deviceMemory || "unknown",
-        cores: navigator.hardwareConcurrency || "unknown",
-        platform: navigator.platform,
-        online: navigator.onLine,
+        memory: (typeof navigator !== "undefined" && navigator.deviceMemory) || "unknown",
+        cores: (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || "unknown",
+        platform: typeof navigator !== "undefined" ? navigator.platform : "unknown",
+        online: typeof navigator !== "undefined" ? navigator.onLine : true,
       };
       console.log("[Context] ✓ Awareness active:", deviceInfo);
     }
@@ -227,9 +230,15 @@ export function useContextAwareness({ enabled = false } = {}) {
     return () => {
       mountedRef.current = false;
       if (intervalId) clearInterval(intervalId);
-      window.removeEventListener("online", () => {});
-      window.removeEventListener("offline", () => {});
-      document.removeEventListener("visibilitychange", () => {});
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (batteryRef && checkBatteryRef) {
+        try {
+          batteryRef.removeEventListener("levelchange", checkBatteryRef);
+          batteryRef.removeEventListener("chargingchange", checkBatteryRef);
+        } catch (_) {}
+      }
     };
   }, [enabled, dispatch]);
 

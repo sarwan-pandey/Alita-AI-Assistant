@@ -81,9 +81,9 @@ export const FEATURE_INFO = {
   translation:           { icon: "🌐", name: "Live Translation",        desc: "Real-time language switching" },
   offline_llm:           { icon: "🧠", name: "Offline AI Brain",        desc: "AI without internet (WebLLM)" },
   // Alita Intelligence
-  alita_emotional_ai:    { icon: "💜", name: "Alita Emotional AI",      desc: "7-layer emotional intelligence with Supporter Principle" },
+  alita_emotional_ai:    { icon: "💜", name: "MJ Emotional AI",      desc: "7-layer emotional intelligence with Supporter Principle" },
   xtts_voice_synthesis:  { icon: "🎙️", name: "XTTS Voice Synthesis",    desc: "GPU-powered natural voice cloning" },
-  multi_llm_racing:      { icon: "⚡", name: "Multi-LLM Racing",        desc: "Groq + NVIDIA + DeepSeek concurrent racing" },
+  multi_llm_racing:      { icon: "⚡", name: "Local AI Brain",            desc: "Qwen3 4B Q4 local model — zero API cost, full privacy" },
   holographic_expressions:{ icon: "🪬", name: "Holographic Expressions", desc: "Real-time avatar face data from emotion" },
   geospatial_dashboard:  { icon: "🗺️", name: "Geospatial Dashboard",    desc: "TomTom traffic, Mapbox routes, weather" },
   song_recognition:      { icon: "🎵", name: "Song Recognition",        desc: "Identify songs playing around you" },

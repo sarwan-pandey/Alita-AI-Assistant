@@ -65,7 +65,7 @@ export function TierGate() {
       const options = {
         key: data.razorpay_key_id,
         subscription_id: data.subscription_id,
-        name: data.name || "Alita Premium",
+        name: data.name || "MJ Premium",
         description: data.description,
         handler: function () {
           // Payment success — webhook will handle tier upgrade
@@ -112,7 +112,7 @@ export function TierGate() {
             {/* Header */}
             <div className="pricing-header">
               <div className="pricing-orb" />
-              <h2 className="pricing-title">Alita Premium</h2>
+              <h2 className="pricing-title">MJ Premium</h2>
               <p className="pricing-subtitle">
                 Unlock the full emotional intelligence suite
               </p>
@@ -171,9 +171,9 @@ export function TierGate() {
 
             {/* Feature List */}
             <ul className="pricing-features">
-              <li><span className="feat-icon">◈</span> Alita Emotional Intelligence (7-Layer AI)</li>
+              <li><span className="feat-icon">◈</span> MJ Emotional Intelligence (7-Layer AI)</li>
               <li><span className="feat-icon">◈</span> XTTS v2 Natural Voice Cloning</li>
-              <li><span className="feat-icon">◈</span> Multi-LLM Racing (Groq + NVIDIA + DeepSeek)</li>
+              <li><span className="feat-icon">◈</span> Local AI Brain (Qwen3 4B Q4 — zero API cost)</li>
               <li><span className="feat-icon">◈</span> Holographic Avatar Expressions</li>
               <li><span className="feat-icon">◈</span> Geospatial Intelligence Dashboard</li>
               <li><span className="feat-icon">◈</span> Song Recognition &amp; Music Control</li>
@@ -203,7 +203,7 @@ export function TierGate() {
               style={{ opacity: loading ? 0.6 : 1 }}
             >
               {loading
-                ? "Redirecting to Stripe…"
+                ? "Opening Razorpay…"
                 : `Continue with ${selected === "monthly" ? "$99 / month" : "$1100 / year"}`
               }
               {!loading && <span className="pricing-cta-arrow">→</span>}

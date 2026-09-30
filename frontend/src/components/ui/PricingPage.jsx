@@ -86,7 +86,7 @@ export function PricingPage({ onClose }) {
       const options = {
         key: data.razorpay_key_id,
         subscription_id: data.subscription_id,
-        name: data.name || "Alita Premium",
+        name: data.name || "MJ Premium",
         description: data.description,
         handler: function () {
           purchase();
@@ -132,7 +132,7 @@ export function PricingPage({ onClose }) {
         {/* Header */}
         <div style={S.header}>
           <h1 style={S.title}>
-            Choose Your <span style={S.brand}>Alita</span> Plan
+            Choose Your <span style={S.brand}>MJ</span> Plan
           </h1>
           <p style={S.subtitle}>
             {isTrialActive

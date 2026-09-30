@@ -80,26 +80,31 @@ export function TestLoginButton({ onSuccess }) {
                 className="test-login-toggle hoverable"
                 onClick={() => setOpen(true)}
                 style={{
-                    background: "none",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    borderRadius: "2px",
-                    color: "rgba(255,255,255,0.3)",
+                    background: "rgba(12, 18, 35, 0.45)",
+                    border: "1px solid rgba(100, 180, 255, 0.12)",
+                    borderRadius: "12px",
+                    color: "rgba(150, 180, 220, 0.6)",
                     fontFamily: "'DM Mono', monospace",
                     fontSize: "0.6rem",
                     letterSpacing: "0.15em",
                     textTransform: "uppercase",
-                    padding: "8px 16px",
-                    cursor: "none",
+                    padding: "10px 16px",
+                    cursor: "pointer",
                     width: "100%",
-                    transition: "color 200ms, border-color 200ms",
+                    transition: "all 300ms cubic-bezier(0.16, 1, 0.3, 1)",
+                    backdropFilter: "blur(12px)",
                 }}
                 onMouseEnter={(e) => {
-                    e.currentTarget.style.color = "rgba(255,255,255,0.55)";
-                    e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+                    e.currentTarget.style.color = "rgba(180, 210, 255, 0.8)";
+                    e.currentTarget.style.borderColor = "rgba(100, 180, 255, 0.25)";
+                    e.currentTarget.style.background = "rgba(20, 30, 55, 0.55)";
+                    e.currentTarget.style.boxShadow = "0 0 20px rgba(80, 160, 240, 0.1)";
                 }}
                 onMouseLeave={(e) => {
-                    e.currentTarget.style.color = "rgba(255,255,255,0.3)";
-                    e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)";
+                    e.currentTarget.style.color = "rgba(150, 180, 220, 0.6)";
+                    e.currentTarget.style.borderColor = "rgba(100, 180, 255, 0.12)";
+                    e.currentTarget.style.background = "rgba(12, 18, 35, 0.45)";
+                    e.currentTarget.style.boxShadow = "none";
                 }}
             >
                 ◈ Beta Access
@@ -126,7 +131,7 @@ export function TestLoginButton({ onSuccess }) {
                     fontSize: "0.62rem",
                     letterSpacing: "0.15em",
                     textTransform: "uppercase",
-                    color: "rgba(255,255,255,0.4)",
+                    color: "rgba(150, 180, 220, 0.5)",
                 }}>
                     Beta Access
                 </span>
@@ -135,8 +140,8 @@ export function TestLoginButton({ onSuccess }) {
                     style={{
                         background: "none",
                         border: "none",
-                        color: "rgba(255,255,255,0.25)",
-                        cursor: "none",
+                        color: "rgba(150, 180, 220, 0.35)",
+                        cursor: "pointer",
                         fontSize: "0.8rem",
                         padding: "2px 6px",
                     }}
@@ -155,22 +160,29 @@ export function TestLoginButton({ onSuccess }) {
                 autoComplete="off"
                 spellCheck={false}
                 style={{
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    borderRadius: "2px",
-                    color: "rgba(255,255,255,0.85)",
+                    background: "rgba(12, 18, 35, 0.5)",
+                    border: "1px solid rgba(100, 180, 255, 0.12)",
+                    borderRadius: "12px",
+                    color: "rgba(220, 235, 255, 0.9)",
                     fontFamily: "'DM Mono', monospace",
                     fontSize: "0.75rem",
                     letterSpacing: "0.04em",
-                    padding: "10px 14px",
+                    padding: "12px 16px",
                     outline: "none",
                     width: "100%",
-                    transition: "border-color 200ms",
+                    transition: "all 300ms cubic-bezier(0.16, 1, 0.3, 1)",
                     boxSizing: "border-box",
                     cursor: "text",
+                    backdropFilter: "blur(12px)",
                 }}
-                onFocus={(e) => e.target.style.borderColor = "rgba(192,132,252,0.5)"}
-                onBlur={(e) => e.target.style.borderColor = "rgba(255,255,255,0.1)"}
+                onFocus={(e) => {
+                    e.target.style.borderColor = "rgba(100, 180, 255, 0.35)";
+                    e.target.style.boxShadow = "0 0 20px rgba(80, 160, 240, 0.12)";
+                }}
+                onBlur={(e) => {
+                    e.target.style.borderColor = "rgba(100, 180, 255, 0.12)";
+                    e.target.style.boxShadow = "none";
+                }}
             />
 
             {/* Password */}
@@ -181,22 +193,29 @@ export function TestLoginButton({ onSuccess }) {
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={handleKey}
                 style={{
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    borderRadius: "2px",
-                    color: "rgba(255,255,255,0.85)",
+                    background: "rgba(12, 18, 35, 0.5)",
+                    border: "1px solid rgba(100, 180, 255, 0.12)",
+                    borderRadius: "12px",
+                    color: "rgba(220, 235, 255, 0.9)",
                     fontFamily: "'DM Mono', monospace",
                     fontSize: "0.75rem",
                     letterSpacing: "0.04em",
-                    padding: "10px 14px",
+                    padding: "12px 16px",
                     outline: "none",
                     width: "100%",
-                    transition: "border-color 200ms",
+                    transition: "all 300ms cubic-bezier(0.16, 1, 0.3, 1)",
                     boxSizing: "border-box",
                     cursor: "text",
+                    backdropFilter: "blur(12px)",
                 }}
-                onFocus={(e) => e.target.style.borderColor = "rgba(192,132,252,0.5)"}
-                onBlur={(e) => e.target.style.borderColor = "rgba(255,255,255,0.1)"}
+                onFocus={(e) => {
+                    e.target.style.borderColor = "rgba(100, 180, 255, 0.35)";
+                    e.target.style.boxShadow = "0 0 20px rgba(80, 160, 240, 0.12)";
+                }}
+                onBlur={(e) => {
+                    e.target.style.borderColor = "rgba(100, 180, 255, 0.12)";
+                    e.target.style.boxShadow = "none";
+                }}
             />
 
             {/* Error */}
@@ -218,22 +237,26 @@ export function TestLoginButton({ onSuccess }) {
                 disabled={loading}
                 className="hoverable"
                 style={{
-                    background: loading ? "rgba(192,132,252,0.05)" : "rgba(192,132,252,0.1)",
-                    border: "1px solid rgba(192,132,252,0.35)",
-                    borderRadius: "2px",
-                    color: loading ? "rgba(192,132,252,0.4)" : "#c084fc",
+                    background: loading
+                        ? "rgba(100, 160, 240, 0.06)"
+                        : "linear-gradient(135deg, rgba(80, 140, 240, 0.15), rgba(60, 120, 220, 0.08))",
+                    border: "1px solid rgba(100, 180, 255, 0.25)",
+                    borderRadius: "12px",
+                    color: loading ? "rgba(100, 180, 255, 0.4)" : "rgba(140, 200, 255, 0.9)",
                     fontFamily: "'DM Mono', monospace",
                     fontSize: "0.65rem",
                     letterSpacing: "0.15em",
                     textTransform: "uppercase",
-                    padding: "11px 24px",
-                    cursor: loading ? "not-allowed" : "none",
+                    padding: "12px 24px",
+                    cursor: loading ? "not-allowed" : "pointer",
                     width: "100%",
-                    transition: "all 200ms",
+                    transition: "all 300ms cubic-bezier(0.16, 1, 0.3, 1)",
+                    backdropFilter: "blur(12px)",
+                    boxShadow: loading ? "none" : "0 0 20px rgba(80, 160, 240, 0.08)",
                 }}
             >
                 {loading ? "Authenticating…" : "Enter →"}
             </button>
         </div>
     );
-}
+}

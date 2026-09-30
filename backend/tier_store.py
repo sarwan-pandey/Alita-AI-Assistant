@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import threading
+from typing import Any, Optional
 
 log = logging.getLogger("Alita.tier_store")
 
@@ -65,7 +66,14 @@ def get_tier(user_id: str) -> str:
     return "free"
 
 
-def set_tier(user_id: str, tier: str, plan: str = "", razorpay_customer_id: str = "") -> None:
+def set_tier(
+    user_id: str,
+    tier: str,
+    plan: str = "",
+    razorpay_customer_id: str = "",
+    subscription_id: str = "",
+    **kwargs: Any,
+) -> None:
     """
     Set the tier for a user and persist to disk.
     """
@@ -74,7 +82,8 @@ def set_tier(user_id: str, tier: str, plan: str = "", razorpay_customer_id: str 
         _cache[user_id] = {
             "tier": tier,
             "plan": plan,
-            "razorpay_customer_id": razorpay_customer_id,
+            "razorpay_customer_id": razorpay_customer_id or subscription_id,
+            "subscription_id": subscription_id or razorpay_customer_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         _save()

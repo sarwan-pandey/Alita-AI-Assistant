@@ -81,6 +81,8 @@ _yamnet_model = None
 _yamnet_labels = None
 _yamnet_available = None
 _yamnet_lock = threading.Lock()
+_yamnet_input_details = None   # cached after load — constant per model
+_yamnet_output_details = None  # cached after load — constant per model
 
 # YAMNet model and label file paths
 _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "yamnet")
@@ -141,6 +143,7 @@ def _create_fallback_labels():
 def _load_yamnet():
     """Lazy-load YAMNet TFLite model."""
     global _yamnet_model, _yamnet_labels, _yamnet_available
+    global _yamnet_input_details, _yamnet_output_details
 
     if _yamnet_available is not None:
         return _yamnet_available
@@ -172,6 +175,10 @@ def _load_yamnet():
             interpreter = Interpreter(model_path=_MODEL_PATH)
             interpreter.allocate_tensors()
             _yamnet_model = interpreter
+
+            # Cache input/output details (constant per model — never changes)
+            _yamnet_input_details = interpreter.get_input_details()
+            _yamnet_output_details = interpreter.get_output_details()
 
             # Load labels
             _yamnet_labels = []
@@ -232,8 +239,8 @@ def classify_sounds(pcm_array: np.ndarray, sample_rate: int = 16000,
 
         # Run inference
         assert _yamnet_model is not None
-        input_details = _yamnet_model.get_input_details()  # type: ignore[union-attr]
-        output_details = _yamnet_model.get_output_details()  # type: ignore[union-attr]
+        input_details = _yamnet_input_details  # cached at load time
+        output_details = _yamnet_output_details  # cached at load time
 
         # Check expected input shape
         input_shape = input_details[0]["shape"]

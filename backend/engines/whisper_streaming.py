@@ -64,7 +64,7 @@ class WhisperStreamProcessor:
         self.sample_rate = sample_rate
 
         # Ring buffer for audio data
-        self._buffer: list[np.ndarray] = []
+        self._buffer: deque[np.ndarray] = deque()
         self._buffer_samples = 0
         self._lock = threading.Lock()
 
@@ -135,7 +135,7 @@ class WhisperStreamProcessor:
 
             # Trim ring buffer if too long
             while self._buffer_samples > RING_BUFFER_SAMPLES and len(self._buffer) > 1:
-                removed = self._buffer.pop(0)
+                removed = self._buffer.popleft()
                 self._buffer_samples -= len(removed)
 
         # Run VAD on this chunk

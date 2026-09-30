@@ -1,0 +1,28 @@
+{
+    "blogger": {
+        "blog_url": "https://www.blogger.com/blog/posts/3548414963199157968",
+        "blog_id": "3548414963199157968",
+        "default_labels": [
+            "AI",
+            "Technology"
+        ],
+        "daily_limit": 3
+    },
+    "youtube": {
+        "channel_name": "Klyrex",
+        "default_visibility": "public",
+        "default_hashtags": [
+            "Shorts",
+            "Trending"
+        ],
+        "daily_limit": 3,
+        "channel_id": "UC7n6E3YNXwrwSd71ChsB-1A"
+    },
+    "chrome_profile": "Default",
+    "headless": true,
+    "daily_tracker": {
+        "last_date": "2026-04-14",
+        "blogs_posted": 0,
+        "shorts_uploaded": 0
+    }
+}

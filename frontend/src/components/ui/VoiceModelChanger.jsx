@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSessionStore } from "../../store/useSessionStore";
+import { VoiceCloner } from "./VoiceCloner";
 
 const BACKEND = (import.meta.env.VITE_WS_BACKEND_URL || "ws://localhost:8000/ws")
     .replace("ws://", "http://")
@@ -53,10 +54,25 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
     const [voices, setVoices] = useState([]);
     const [languages, setLanguages] = useState([]);
     const [selectedLang, setSelectedLang] = useState("en");
-    const [selectedVoice, setSelectedVoice] = useState("en_jenny");
+    const [selectedVoice, setSelectedVoice] = useState(() => {
+        const saved = localStorage.getItem("alita_voice_id");
+        if (!saved || saved === "chatterbox_mj" || saved === "f5_mj_clone" || saved === "chattts_mj") {
+            localStorage.setItem("alita_voice_id", "chatterbox_turbo_mj");
+            return "chatterbox_turbo_mj";
+        }
+        return saved;
+    });
     const [isOpen, setIsOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const [previewPlaying, setPreviewPlaying] = useState(null);
+    const [showCloner, setShowCloner] = useState(false);
+    const [activeMood, setActiveMood] = useState("affectionate");
+    const [availableMoods, setAvailableMoods] = useState([
+        { id: "affectionate", name: "Affectionate & Warm", icon: "💖" },
+        { id: "playful", name: "Playful & Teasing", icon: "✨" },
+        { id: "soothing", name: "Soothing & Tender", icon: "🌙" },
+        { id: "calm", name: "Calm & Natural", icon: "☕" },
+    ]);
     const synthVoicesRef = useRef([]);
 
     // Load browser speech synthesis voices
@@ -88,37 +104,65 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
         }
     }, [externalVoiceId]);
 
-    // Fetch voices and languages on mount
+    // Fetch voices, languages, and mood on mount
     useEffect(() => {
         Promise.all([
-            fetch(`${BACKEND}/voices`).then((r) => r.json()),
-            fetch(`${BACKEND}/languages`).then((r) => r.json()),
+            fetch(`${BACKEND}/voices`).then((r) => r.json()).catch(() => ({})),
+            fetch(`${BACKEND}/languages`).then((r) => r.json()).catch(() => ({})),
+            fetch(`${BACKEND}/api/voice/mood`).then((r) => r.json()).catch(() => ({})),
         ])
-            .then(([vData, lData]) => {
-                setVoices(vData.voices || []);
-                setLanguages(lData.languages || []);
+            .then(([vData, lData, mData]) => {
+                if (vData.voices && Array.isArray(vData.voices) && vData.voices.length > 0) {
+                    setVoices(vData.voices);
+                }
+                if (lData.languages && Array.isArray(lData.languages) && lData.languages.length > 0) {
+                    setLanguages(lData.languages);
+                }
+                if (mData.moods) setAvailableMoods(mData.moods);
+                if (mData.active_mood) setActiveMood(mData.active_mood);
             })
             .catch(() => {
-                // Fallback
+                // Fallback: Chatterbox Turbo
                 setLanguages([
-                    { code: "en", name: "English", free_voices: 1, premium_voices: 3 },
-                    { code: "hi", name: "हिंदी (Hindi)", free_voices: 1, premium_voices: 1 },
-                    { code: "es", name: "Español (Spanish)", free_voices: 1, premium_voices: 1 },
-                    { code: "fr", name: "Français (French)", free_voices: 1, premium_voices: 1 },
+                    { code: "en", name: "English", free_voices: 1, premium_voices: 0 },
                 ]);
                 setVoices([
-                    { id: "en_jenny", name: "Jenny (English Female)", lang: "en", tier_required: "free", quality: "high", available: true },
-                    { id: "hi_swara", name: "Swara (Hindi Female)", lang: "hi", tier_required: "free", quality: "high", available: true },
-                    { id: "es_lucia", name: "Lucia (Spanish Female)", lang: "es", tier_required: "free", quality: "high", available: true },
-                    { id: "fr_denise", name: "Denise (French Female)", lang: "fr", tier_required: "free", quality: "high", available: true },
+                    {
+                        id: "chatterbox_turbo_mj",
+                        name: "MJ (Chatterbox Turbo)",
+                        lang: "en",
+                        tier_required: "free",
+                        quality: "ultra",
+                        available: true,
+                        engine: "chatterbox_turbo",
+                        description: "350M-param neural voice with [laugh], [sigh], [cough] expression tags",
+                    },
                 ]);
             });
     }, []);
 
+    const handleMoodChange = async (moodId) => {
+        setActiveMood(moodId);
+        try {
+            await fetch(`${BACKEND}/api/voice/mood`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mood: moodId }),
+            });
+        } catch (err) {
+            console.warn("Failed to set active voice mood:", err);
+        }
+    };
+
     const isBetaUser = user?.email?.includes("@aura.test") || user?.id?.startsWith?.("test_");
     const canAccessPremium = tier === "premium" || isBetaUser;
 
-    const filteredVoices = voices.filter((v) => v.lang === selectedLang);
+    // Filter to show active models
+    const filteredVoices = voices.filter(
+        (v) =>
+            (v.id === "chatterbox_turbo_mj" || v.engine === "chatterbox_turbo") &&
+            (v.lang === selectedLang || v.lang === "all" || !v.lang)
+    );
 
     // ── Language switch handler (with speechSynthesis fix) ────────────────
     const handleLangChange = useCallback((langCode) => {
@@ -286,7 +330,24 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                                 >
                                     <div className="voice-option-left">
                                         <div className="voice-option-info">
-                                            <span className="voice-option-name">{voice.name}</span>
+                                            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                                <span className="voice-option-name">{voice.name}</span>
+                                                {voice.engine === "chattts" && (
+                                                    <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(244, 114, 182, 0.2)", color: "#f472b6", border: "1px solid rgba(244, 114, 182, 0.3)" }}>
+                                                        💖 ChatTTS
+                                                    </span>
+                                                )}
+                                                {voice.engine === "f5" && (
+                                                    <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(56, 189, 248, 0.2)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.3)" }}>
+                                                        🌊 F5-TTS
+                                                    </span>
+                                                )}
+                                                {voice.engine === "chatterbox" && (
+                                                    <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(168, 85, 247, 0.2)", color: "#c084fc", border: "1px solid rgba(168, 85, 247, 0.3)" }}>
+                                                        ✨ Chatterbox
+                                                    </span>
+                                                )}
+                                            </div>
                                             <span className="voice-option-desc">
                                                 {voice.description}
                                             </span>
@@ -306,8 +367,8 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                                                 {isPreviewing ? "◼" : "▶"}
                                             </span>
                                         )}
-                                        {voice.quality === "high" && (
-                                            <span className="voice-quality-badge">HD</span>
+                                        {voice.quality === "ultra" && (
+                                            <span className="voice-quality-badge" style={{ background: "rgba(168, 85, 247, 0.25)", color: "#c084fc", border: "1px solid rgba(168, 85, 247, 0.4)" }}>Studio HD</span>
                                         )}
                                         {isSelected && (
                                             <span className="voice-option-active">●</span>
@@ -323,8 +384,100 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                             );
                         })}
                     </div>
+
+                    {/* MJ Emotional Mood Selector (Method 3 -> Method 1) */}
+                    <div
+                        style={{
+                            marginTop: "10px",
+                            padding: "10px 12px",
+                            background: "rgba(244, 114, 182, 0.08)",
+                            borderRadius: "10px",
+                            border: "1px solid rgba(244, 114, 182, 0.22)",
+                        }}
+                    >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                            <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "#f472b6", letterSpacing: "0.4px" }}>
+                                💖 MJ Emotional Mood
+                            </span>
+                            <span style={{ fontSize: "0.68rem", color: "rgba(255,255,255,0.55)" }}>
+                                Oral Prosody
+                            </span>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                            {availableMoods.map((m) => {
+                                const isActive = activeMood === m.id;
+                                return (
+                                    <button
+                                        key={m.id}
+                                        type="button"
+                                        className="hoverable"
+                                        onClick={() => handleMoodChange(m.id)}
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "6px",
+                                            padding: "6px 8px",
+                                            borderRadius: "7px",
+                                            border: isActive ? "1px solid #f472b6" : "1px solid rgba(255,255,255,0.12)",
+                                            background: isActive ? "rgba(244, 114, 182, 0.25)" : "rgba(255,255,255,0.04)",
+                                            color: isActive ? "#fff" : "rgba(255,255,255,0.8)",
+                                            fontSize: "0.73rem",
+                                            cursor: "pointer",
+                                            transition: "all 0.15s ease",
+                                            textAlign: "left",
+                                        }}
+                                    >
+                                        <span style={{ fontSize: "0.85rem" }}>{m.icon || "💖"}</span>
+                                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                            <div style={{ fontWeight: isActive ? 700 : 500 }}>{m.name.split("&")[0].trim()}</div>
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* F5-TTS Voice Studio trigger */}
+                    <button
+                        className="vc-clone-trigger hoverable"
+                        onClick={() => { setShowCloner(true); setIsOpen(false); }}
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "10px",
+                            background: "linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(168, 85, 247, 0.15))",
+                            border: "1px solid rgba(56, 189, 248, 0.35)",
+                            borderRadius: "10px",
+                            padding: "10px 14px",
+                            marginTop: "8px",
+                            cursor: "pointer",
+                            width: "100%",
+                            textAlign: "left",
+                            transition: "all 0.2s ease",
+                        }}
+                    >
+                        <span style={{ fontSize: "1.3rem" }}>🌊</span>
+                        <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "#38bdf8" }}>
+                                F5-TTS Voice Studio
+                            </div>
+                            <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.65)" }}>
+                                Zero-shot clone any voice from 3‑15s audio
+                            </div>
+                        </div>
+                        <span style={{ color: "#38bdf8", fontSize: "0.95rem", fontWeight: "bold" }}>→</span>
+                    </button>
                 </div>
             )}
+
+            {/* Voice Cloner Modal */}
+            <VoiceCloner
+                isOpen={showCloner}
+                onClose={() => setShowCloner(false)}
+                onVoiceCloned={(voiceId) => {
+                    sendVoiceChange?.(voiceId);
+                }}
+            />
         </div>
     );
 }

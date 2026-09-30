@@ -742,13 +742,6 @@ async def generate_intel_brief(req: BriefRequest):
         return cached
 
     try:
-        import google.generativeai as genai
-        # Use same key rotation as the main app
-        from main import key_rotator, settings
-
-        genai.configure(api_key=key_rotator.get_key())
-        model = genai.GenerativeModel(model_name=settings.gemini_model)
-
         prompt = (
             f"You are a senior intelligence analyst. Generate a concise intelligence brief "
             f"for region: {req.region}, focus area: {req.focus}.\n\n"
@@ -765,15 +758,39 @@ async def generate_intel_brief(req: BriefRequest):
             f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}."
         )
 
-        response = model.generate_content(prompt)
-        brief_text = response.text
+        brief_text = None
+        source = "ollama"
+
+        # 1. Try local Ollama first (zero API cost, 100% offline)
+        try:
+            from ollama_client import ollama_chat, is_ollama_running
+            if is_ollama_running():
+                brief_text = ollama_chat(prompt=prompt, max_tokens=600)
+                source = "ollama"
+        except Exception as ollama_err:
+            log.debug("Ollama intel brief failed: %s", ollama_err)
+
+        # 2. Fallback to Gemini if API key configured
+        if not brief_text:
+            from main import key_rotator, settings
+            key = key_rotator.get_key()
+            if key:
+                import google.generativeai as genai
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel(model_name=settings.gemini_model)
+                response = model.generate_content(prompt)
+                brief_text = response.text
+                source = "gemini"
+
+        if not brief_text:
+            raise RuntimeError("Neither Ollama nor Gemini is available to generate brief")
 
         result = {
             "brief": brief_text,
             "region": req.region,
             "focus": req.focus,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "source": "gemini",
+            "source": source,
         }
         _set_cache(cache_key, result)
         return result

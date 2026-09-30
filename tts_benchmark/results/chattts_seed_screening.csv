@@ -1,0 +1,46 @@
+seed,sentence_id,sentence_text,temperature,top_P,top_K,latency_ms,audio_path
+2222,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,18516.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_2222\s1_greeting.wav
+2222,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,9998.7,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_2222\s2_short_greet.wav
+2222,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,11074.2,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_2222\s3_conversational.wav
+2222,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,22069.7,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_2222\s4_long_sentence.wav
+2222,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,11414.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_2222\s5_reflective.wav
+3333,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,12171.6,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_3333\s1_greeting.wav
+3333,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,8039.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_3333\s2_short_greet.wav
+3333,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,11434.4,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_3333\s3_conversational.wav
+3333,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,18398.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_3333\s4_long_sentence.wav
+3333,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,10808.4,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_3333\s5_reflective.wav
+4099,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,8795.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4099\s1_greeting.wav
+4099,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,5036.1,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4099\s2_short_greet.wav
+4099,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,8630.1,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4099\s3_conversational.wav
+4099,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,16674.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4099\s4_long_sentence.wav
+4099,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,8287.2,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4099\s5_reflective.wav
+4220,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,9540.7,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4220\s1_greeting.wav
+4220,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,5074.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4220\s2_short_greet.wav
+4220,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,8352.1,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4220\s3_conversational.wav
+4220,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,16061.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4220\s4_long_sentence.wav
+4220,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,8230.7,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_4220\s5_reflective.wav
+5099,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,9041.5,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_5099\s1_greeting.wav
+5099,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,4957.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_5099\s2_short_greet.wav
+5099,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,8466.6,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_5099\s3_conversational.wav
+5099,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,16113.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_5099\s4_long_sentence.wav
+5099,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,8552.5,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_5099\s5_reflective.wav
+6653,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,7920.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_6653\s1_greeting.wav
+6653,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,5021.4,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_6653\s2_short_greet.wav
+6653,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,10326.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_6653\s3_conversational.wav
+6653,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,17304.0,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_6653\s4_long_sentence.wav
+6653,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,7322.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_6653\s5_reflective.wav
+7869,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,8701.2,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_7869\s1_greeting.wav
+7869,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,5037.0,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_7869\s2_short_greet.wav
+7869,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,7372.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_7869\s3_conversational.wav
+7869,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,17125.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_7869\s4_long_sentence.wav
+7869,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,8650.4,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_7869\s5_reflective.wav
+8888,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,10934.6,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_8888\s1_greeting.wav
+8888,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,7409.0,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_8888\s2_short_greet.wav
+8888,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,11945.4,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_8888\s3_conversational.wav
+8888,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,19733.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_8888\s4_long_sentence.wav
+8888,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,8849.5,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_8888\s5_reflective.wav
+9999,s1_greeting,"Hello, I am MJ. I am ready to help you. What would you like to do today?",0.3,0.7,20,8311.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_9999\s1_greeting.wav
+9999,s2_short_greet,Good morning. How can I help you?,0.3,0.7,20,6127.8,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_9999\s2_short_greet.wav
+9999,s3_conversational,"Okay, give me a moment. Let me check that for you.",0.3,0.7,20,7815.9,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_9999\s3_conversational.wav
+9999,s4_long_sentence,"Today I will help you organize your tasks, answer your questions, and keep track of everything you need to do.",0.3,0.7,20,16972.3,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_9999\s4_long_sentence.wav
+9999,s5_reflective,I understand. Let me think about that for a moment.,0.3,0.7,20,11444.5,C:\Users\sarwa\Desktop\aura-assistant\tts_benchmark\chattts\seed_9999\s5_reflective.wav

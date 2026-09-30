@@ -34,8 +34,8 @@ export function useLipSync(visemeSequence) {
 
                 if (next) {
                     const segDuration = next.time - current.time;
-                    const segProgress = (elapsed - current.time) / segDuration;
-                    const smooth = Math.min(1, Math.max(0, segProgress));
+                    const segProgress = segDuration > 0 ? (elapsed - current.time) / segDuration : 1;
+                    const smooth = Math.min(1, Math.max(0, Number.isFinite(segProgress) ? segProgress : 0));
 
                     setCurrentViseme({
                         viseme: smooth < 0.5 ? current.viseme : next.viseme,

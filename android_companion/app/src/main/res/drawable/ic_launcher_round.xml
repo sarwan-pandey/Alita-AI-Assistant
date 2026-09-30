@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Circular Dark Background -->
+    <path
+        android:fillColor="#0B0F19"
+        android:pathData="M54,54m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0" />
+    <!-- Outer Violet Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#8B5CF6"
+        android:strokeWidth="4"
+        android:pathData="M54,54m-42,0a42,42 0,1 1,84 0a42,42 0,1 1,-84 0" />
+    <!-- Inner Cyan Circuit Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00F5FF"
+        android:strokeWidth="6"
+        android:pathData="M54,54m-30,0a30,30 0,1 1,60 0a30,30 0,1 1,-60 0" />
+    <!-- Central AI Core Orb -->
+    <path
+        android:fillColor="#00F5FF"
+        android:pathData="M54,54m-16,0a16,16 0,1 1,32 0a16,16 0,1 1,-32 0" />
+    <!-- Core Bright Dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+</vector>

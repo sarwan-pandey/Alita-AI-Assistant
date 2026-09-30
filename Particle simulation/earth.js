@@ -492,17 +492,20 @@ export class ParticlesSwarm {
         this.container.addEventListener('mousedown', this._onMouseDown);
         this.container.addEventListener('mouseup', this._onMouseUp);
         this.container.addEventListener('mouseleave', this._onMouseLeave);
-        // Touch support
-        this.container.addEventListener('touchmove', (e) => {
+        this._onTouchMove = (e) => {
             e.preventDefault();
             const touch = e.touches[0];
-            this._onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
-        }, { passive: false });
-        this.container.addEventListener('touchstart', (e) => {
+            if (touch) this._onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
+        };
+        this._onTouchStart = (e) => {
             const touch = e.touches[0];
-            this._onMouseDown({ clientX: touch.clientX, clientY: touch.clientY });
-        });
-        this.container.addEventListener('touchend', () => this._onMouseUp());
+            if (touch) this._onMouseDown({ clientX: touch.clientX, clientY: touch.clientY });
+        };
+        this._onTouchEnd = () => this._onMouseUp();
+
+        this.container.addEventListener('touchmove', this._onTouchMove, { passive: false });
+        this.container.addEventListener('touchstart', this._onTouchStart);
+        this.container.addEventListener('touchend', this._onTouchEnd);
 
         // ── Clock & Start ───────────────────────────────────────────────────
         this.clock = new THREE.Clock();
@@ -813,6 +816,9 @@ export class ParticlesSwarm {
         this.container.removeEventListener('mousedown', this._onMouseDown);
         this.container.removeEventListener('mouseup', this._onMouseUp);
         this.container.removeEventListener('mouseleave', this._onMouseLeave);
+        if (this._onTouchMove) this.container.removeEventListener('touchmove', this._onTouchMove);
+        if (this._onTouchStart) this.container.removeEventListener('touchstart', this._onTouchStart);
+        if (this._onTouchEnd) this.container.removeEventListener('touchend', this._onTouchEnd);
 
         // Dispose Three.js resources
         this.earthPoints.geometry.dispose();

@@ -1,0 +1,13 @@
+sentence_id,text,audio_duration_s,generation_time_s,rtf,sample_rate,device,audio_file
+S01,"Hello! I am MJ, your personal AI assistant. How can I help you today?",6.12,46.18,7.55,24000,cpu,tts_benchmark\chatterbox\samples\s01.wav
+S02,The database query failed because the connection pool timed out after thirty seconds.,4.8,37.79,7.87,24000,cpu,tts_benchmark\chatterbox\samples\s02.wav
+S03,"I completely understand how frustrating that bug can be. Take a deep breath, and let us solve it together.",6.72,48.35,7.19,24000,cpu,tts_benchmark\chatterbox\samples\s03.wav
+S04,"Would you like me to push these changes to staging, or should we run the test suite first?",5.08,38.4,7.56,24000,cpu,tts_benchmark\chatterbox\samples\s04.wav
+S05,"Yesterday we optimized the audio pipeline, and today our latency is down by forty percent.",5.56,32.19,5.79,24000,cpu,tts_benchmark\chatterbox\samples\s05.wav
+S06,Got it. I am on it right now.,2.72,16.84,6.19,24000,cpu,tts_benchmark\chatterbox\samples\s06.wav
+S07,"Memory usage peaked at 3.4 gigabytes across 12 worker threads, with an average latency of 85 milliseconds.",7.32,37.23,5.09,24000,cpu,tts_benchmark\chatterbox\samples\s07.wav
+S08,"First, stop the running container. Next, rebuild the Docker image, and finally restart the service.",7.04,34.82,4.95,24000,cpu,tts_benchmark\chatterbox\samples\s08.wav
+S09,That is actually pretty clever! I probably would not have thought of doing it that way.,5.0,34.65,6.93,24000,cpu,tts_benchmark\chatterbox\samples\s09.wav
+S10,Warning: CPU utilization has exceeded 90 percent on the primary node.,6.36,44.56,7.01,24000,cpu,tts_benchmark\chatterbox\samples\s10.wav
+S11,"The main problem is the database connection, not the network configuration.",4.72,35.64,7.55,24000,cpu,tts_benchmark\chatterbox\samples\s11.wav
+S12,"Looking at the architecture, separating the English and Hindi synthesis pipelines gives us much better control.",6.28,46.23,7.36,24000,cpu,tts_benchmark\chatterbox\samples\s12.wav

@@ -27,7 +27,7 @@ class GroqKeyRotator:
         now = time.time()
         for _ in range(len(self.keys)):
             key = self.keys[self.index % len(self.keys)]
-            self.index += 1
+            self.index = (self.index + 1) % len(self.keys)
             # Skip rate-limited keys
             if key in self._rate_limited and self._rate_limited[key] > now:
                 continue

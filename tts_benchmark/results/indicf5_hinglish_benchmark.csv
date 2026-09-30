@@ -1,0 +1,11 @@
+test_id,category,text,status,error,audio_duration_s,generation_time_s,rtf,device,ref_audio
+H01,devanagari_hindi,"नमस्ते! मैं एमजे हूँ, आपकी पर्सनल एआई असिस्टेंट। आज मैं आपकी क्या मदद कर सकती हूँ?",ok,,7.63,118.98,15.6,cpu,alita_hi.wav
+H02,devanagari_hindi,"आज मौसम बहुत अच्छा है, चलिए आज का काम शुरू करते हैं।",ok,,4.79,116.6,24.35,cpu,alita_hi.wav
+L01,latin_hinglish,Aaj mujhe thoda kaam karna hai aur ek naya project shuru karna hai.,ok,,2.42,90.17,37.24,cpu,alita_hi.wav
+L02,latin_hinglish,Aap kaise hain? Kya hum meeting shuru karein?,ok,,1.62,89.28,55.07,cpu,alita_hi.wav
+M01,mixed_hindi_english,आज हमारा project deployment के लिए ready है.,ok,,2.6,70.73,27.18,cpu,alita_hi.wav
+M02,mixed_hindi_english,Server connection check karo aur database logs verify karo.,ok,,2.13,74.31,34.83,cpu,alita_hi.wav
+E01,english_technical,The database query failed because the connection pool timed out after thirty seconds.,ok,,6.05,135.39,22.39,cpu,alita_en_original.wav
+E02,english_technical,Memory usage peaked at 3.4 gigabytes across 12 worker threads.,ok,,4.41,119.79,27.19,cpu,alita_en_original.wav
+C01,code_switched,Main kal office jaa raha hoon kyunki presentation delivery scheduled hai.,ok,,2.65,70.09,26.5,cpu,alita_hi.wav
+C02,code_switched,"Code review complete ho gaya hai, please PR merge kar do.",ok,,2.06,93.37,45.35,cpu,alita_hi.wav

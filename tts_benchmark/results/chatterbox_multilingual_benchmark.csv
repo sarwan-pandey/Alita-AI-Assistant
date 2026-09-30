@@ -1,0 +1,8 @@
+test_id,exact_input,language_id,output_wav,duration_s,generation_latency_s,rtf,mean_pitch_hz,detected_lang,transcription
+H1,"नमस्ते! मैं एमजे हूँ, आपकी पर्सनल एआई असिस्टेंट।",hi,tts_benchmark\chatterbox\samples\multilingual\H1.wav,4.64,50.37,10.86,172.1,en,"Namaste, M.M.J. Hong,  OptiPersonal AI Assistant."
+H2,"आज मौसम बहुत अच्छा है, चलिए आज का काम शुरू करते हैं।",hi,tts_benchmark\chatterbox\samples\multilingual\H2.wav,5.68,59.14,10.41,181.6,en,"Adjmasam Bhada Chahi, Telee Atka Khamsheru Kirtihil."
+L1,Aaj mujhe thoda kaam karna hai aur ek naya project shuru karna hai.,hi,tts_benchmark\chatterbox\samples\multilingual\L1.wav,5.44,55.21,10.15,194.5,en,"Ijmuhethel.com, Karnahai, our Eknaya Project, Shuru Karnahai."
+L2,Aap kaise hain? Kya hum meeting shuru karein?,hi,tts_benchmark\chatterbox\samples\multilingual\L2.wav,2.96,37.41,12.64,190.0,en,"Up-Kai's Hain, Kaya-Hum Meeting Shuru Karene."
+M1,Aaj hamara project deployment ke liye ready hai.,hi,tts_benchmark\chatterbox\samples\multilingual\M1.wav,3.56,34.75,9.76,174.0,en,"I-H-H-H-M-R project deployment, K-L-I-Ready-High."
+M2,Server connection check karo aur database logs verify karo.,hi,tts_benchmark\chatterbox\samples\multilingual\M2.wav,4.04,25.64,6.35,232.3,en,"Server connection check, car or database logs verify carol."
+E1,The database query failed because the connection pool timed out.,en,tts_benchmark\chatterbox\samples\multilingual\E1.wav,3.68,34.42,9.35,190.4,en,"The database query failed, because the connection pool timed out."
