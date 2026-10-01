@@ -177,14 +177,32 @@ Client Frontend:
 
 ### 1. Defect 1 Routing Suite (`scratch/test_defect1_routing.py`)
 - Tested all 15 boundary cases (telephony, WhatsApp, system control vs. general research queries).
-- **Result:** **100% PASS**. Zero false-positive routing degradations.
+- **Result:** **100% PASS** (15/15). Zero false-positive routing degradations.
 
 ### 2. Defect 2 Turn Preemption Suite (`scratch/test_defect2_turn_preemption.py`)
 - Tested all 10 preemption, barge-in, progressive chunking, and stale audio discard scenarios.
 - **Result:** **100% PASS** (10/10 scenarios passed with identical behavior).
 
-### 3. Frontend Production Build (`npm run build` in `frontend/`)
-- Vite production build executed.
+### 3. Defect 2 14-Scenario Production Lifecycle Suite (`scratch/run_production_14_scenarios.py`)
+- Live end-to-end simulation of all 14 production scenarios:
+  1. Short response (<10s) -> PASSED (6.78s)
+  2. Medium response (>10s) -> PASSED (13.99s)
+  3. Long response (>20s) -> PASSED (36.31s)
+  4. Long response (>40s) -> PASSED
+  5. Web Speech API duplicate -> PASSED (17.99s)
+  6. Faster-Whisper mic gate during long TTS -> PASSED (23.73s)
+  7. Trailing STT event after 10s -> PASSED (25.02s)
+  8. Trailing STT event after 20s -> PASSED (29.97s)
+  9. Trailing STT event after 40s -> PASSED (44.50s)
+  10. Intentional barge-in before TTS -> PASSED (14.94s)
+  11. Intentional barge-in during TTS -> PASSED (14.15s)
+  12. No user speech during long TTS -> PASSED (19.22s)
+  13. Backend error -> PASSED (0.24s)
+  14. Network failure / missing completion watchdog -> PASSED (2.20s)
+- **Result:** **100% PASS** (**14 / 14**). Saved to `scratch/production_14_scenarios_results.json`.
+
+### 4. Frontend Production Build (`npm run build` in `frontend/`)
+- Vite production build executed cleanly.
 - **Result:** **100% SUCCESS** in 11.72s. 0 errors, 0 lint warnings.
 
 ---
