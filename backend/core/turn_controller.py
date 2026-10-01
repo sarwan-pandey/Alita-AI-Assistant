@@ -135,6 +135,7 @@ class TurnController:
         self._seq_lock = threading.Lock()
         self._active_turns: Dict[str, TurnRecord] = {}  # session_id -> TurnRecord
         self._stt_history: Dict[str, List[Tuple[float, str, int]]] = {}  # session_id -> [(time, norm_text, turn_id)]
+        self._last_discard_reason: Dict[str, str] = {}  # session_id -> discard_reason
         self._state_lock = threading.Lock()
 
     def next_id(self) -> int:
@@ -142,6 +143,15 @@ class TurnController:
         with self._seq_lock:
             self._seq += 1
             return self._seq
+
+    def get_last_discard_reason(self, session_id: str) -> str:
+        with self._state_lock:
+            return self._last_discard_reason.get(session_id, "duplicate_stt")
+
+    def is_active_turn_in_flight(self, session_id: str) -> bool:
+        with self._state_lock:
+            active = self._active_turns.get(session_id)
+            return bool(active and not active.is_cancelled and not active.is_completed)
 
     def check_duplicate_stt(self, session_id: str, raw_transcript: str, window_s: float = 0.75) -> Tuple[bool, Optional[int], float]:
         """
@@ -163,6 +173,7 @@ class TurnController:
 
                 # Exact match with active turn within window_s
                 if norm == norm_active and dt_active <= window_s:
+                    self._last_discard_reason[session_id] = "duplicate_stt"
                     log.warning(
                         "[TURN] DUPLICATE_STT_DISCARDED | turn_id=None | time=%.4f | stage=stt_gate_active | "
                         "transcript='%s' matches active turn=%d (%.3fs into turn)",
@@ -175,6 +186,7 @@ class TurnController:
                 words_in = norm.split()
                 words_act = norm_active.split()
                 if norm in norm_active and len(words_in) < len(words_act):
+                    self._last_discard_reason[session_id] = "trailing_fragment"
                     log.warning(
                         "[TURN] TRAILING_STT_FRAGMENT_DISCARDED | turn_id=None | time=%.4f | stage=stt_gate_fragment | "
                         "transcript='%s' is fragment of active turn=%d ('%s') (%.3fs into turn)",
@@ -184,6 +196,7 @@ class TurnController:
 
                 # Non-command single-word noise filler while active turn is generating
                 if len(words_in) == 1 and words_in[0] in _NOISE_FILLERS:
+                    self._last_discard_reason[session_id] = "noise_filler"
                     log.warning(
                         "[TURN] NOISE_FILLER_DISCARDED | turn_id=None | time=%.4f | stage=stt_gate_filler | "
                         "transcript='%s' dropped during active turn=%d (%.3fs into turn)",
@@ -198,6 +211,7 @@ class TurnController:
                 if dt > window_s * 4.0:  # prune ancient entries
                     break
                 if dt <= window_s and norm == prev_norm:
+                    self._last_discard_reason[session_id] = "duplicate_stt"
                     log.warning(
                         "[TURN] DUPLICATE_STT_DISCARDED | turn_id=None | time=%.4f | stage=stt_gate_history | "
                         "transcript='%s' matches turn=%d received %.3fs ago",

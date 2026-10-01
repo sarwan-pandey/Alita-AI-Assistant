@@ -379,6 +379,21 @@ export default function App() {
         );
         break;
 
+      case "turn_discarded":
+        console.log("[WS] Turn intentionally discarded by server:", msg.reason, msg.transcript);
+        // Turn was intentionally discarded (duplicate STT / trailing fragment / noise filler).
+        // It is NOT an error, NOT an LLM failure, and NOT a TTS failure.
+        if (!msg.active_turn_in_flight) {
+          setIsThinking(false);
+        }
+        window.dispatchEvent(
+          new CustomEvent("Alita:turn_discarded", { detail: msg })
+        );
+        window.dispatchEvent(
+          new CustomEvent("MJ:turn_discarded", { detail: msg })
+        );
+        break;
+
       case "voice_changed":
         console.log("[Voice] Switched to:", msg.voice_name);
         // Update STT language when user manually switches voice

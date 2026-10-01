@@ -1568,8 +1568,20 @@ async def run_full_pipeline(
     from core.turn_controller import turn_controller
     turn = turn_controller.start_turn(session.session_id, transcript)
     if turn is None:
-        log.warning("[TURN] DUPLICATE_STT_DISCARDED | session=%s | transcript='%s'",
-                    session.session_id, transcript[:50])
+        reason = turn_controller.get_last_discard_reason(session.session_id)
+        in_flight = turn_controller.is_active_turn_in_flight(session.session_id)
+        log.warning("[TURN] DUPLICATE_STT_DISCARDED | session=%s | reason=%s | in_flight=%s | transcript='%s'",
+                    session.session_id, reason, in_flight, transcript[:50])
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "turn_discarded",
+                "session_id": session.session_id,
+                "reason": reason,
+                "transcript": transcript,
+                "active_turn_in_flight": in_flight,
+            }))
+        except Exception as send_err:
+            log.debug("[%s] Failed to send turn_discarded frame: %s", session.session_id, send_err)
         return
 
     # ── DIAGNOSTICS: 1. STT final transcript & 2. request_id ────────────
@@ -2814,8 +2826,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         from core.turn_controller import turn_controller
         turn = turn_controller.start_turn(session_id, text_input)
         if turn is None:
-            # Duplicate STT within conservative window (500-750ms) — discarded at gate
-            log.info("[%s] Duplicate STT discarded at gate: '%s'", session_id, text_input[:50])
+            reason = turn_controller.get_last_discard_reason(session_id)
+            in_flight = turn_controller.is_active_turn_in_flight(session_id)
+            log.info("[%s] Duplicate/fragment STT discarded at gate (%s, in_flight=%s): '%s'",
+                     session_id, reason, in_flight, text_input[:50])
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "turn_discarded",
+                    "session_id": session_id,
+                    "reason": reason,
+                    "transcript": text_input,
+                    "active_turn_in_flight": in_flight,
+                }))
+            except Exception as send_err:
+                log.debug("[%s] Failed to send turn_discarded frame: %s", session_id, send_err)
             return
 
         from core.diagnostics import diagnostics, resolve_tts_engine

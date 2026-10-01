@@ -304,15 +304,31 @@ export function AudioCapture({
       audioStreamPlayer.interrupt();
     };
 
+    const discardHandler = (e) => {
+      const msg = e.detail;
+      // If there is NO active turn in flight on the backend and audio is not playing:
+      // immediately reset processing state and disarm watchdog so mic is ready without waiting
+      if (!msg?.active_turn_in_flight && !audioStreamPlayer.isPlaying && audioStreamPlayer.queue.length === 0) {
+        clearTimeout(processingTimeoutRef.current);
+        processingRef.current = false;
+        ttsPlayingRef.current = false;
+        setMicState("active");
+      }
+    };
+
     window.addEventListener("MJ:tts_chunk", handler);
     window.addEventListener("Alita:tts_chunk", handler);
     window.addEventListener("MJ:turn_error", errorHandler);
     window.addEventListener("Alita:turn_error", errorHandler);
+    window.addEventListener("MJ:turn_discarded", discardHandler);
+    window.addEventListener("Alita:turn_discarded", discardHandler);
     return () => {
       window.removeEventListener("MJ:tts_chunk", handler);
       window.removeEventListener("Alita:tts_chunk", handler);
       window.removeEventListener("MJ:turn_error", errorHandler);
       window.removeEventListener("Alita:turn_error", errorHandler);
+      window.removeEventListener("MJ:turn_discarded", discardHandler);
+      window.removeEventListener("Alita:turn_discarded", discardHandler);
     };
   }, []);
 
