@@ -100,6 +100,7 @@ export function AudioCapture({
   const restartTimeoutRef = useRef(null);
   const lastAlitaTextRef = useRef(""); // what Alita just said (for echo rejection)
   const processingRef = useRef(false); // prevents double-sends while backend is processing
+  const processingTimeoutRef = useRef(null); // watchdog timer for in-flight processing state
   const lastSentTextRef = useRef(""); // last text sent to backend (anti-repeat)
   const lastSentTimeRef = useRef(0); // timestamp of last sent text
   // ── AGI: Utterance accumulation (wait for user to finish full instruction) ──
@@ -169,14 +170,48 @@ export function AudioCapture({
     cancelSpecRef.current = cancelSpeculative;
   });
 
+  const handleAudioFrame = useCallback((frame, prob) => {
+    // Drop audio chunks during TTS playback or immediately following TTS to reject echo
+    if (ttsPlayingRef.current) return;
+    // Drop audio chunks while backend is processing committed utterance (rejects trailing silence/noise)
+    if (processingRef.current) return;
+    const timeSinceTTS = Date.now() - (ttsEndTimeRef.current || 0);
+    if (ttsEndTimeRef.current > 0 && timeSinceTTS < 800) return;
+
+    // Send single unified 16kHz Float32Array PCM frame to backend Whisper
+    window.dispatchEvent(
+      new CustomEvent("Alita:offline_audio_chunk", {
+        detail: { pcm_binary: frame.buffer.slice(0) },
+      })
+    );
+  }, []);
+
+  const handleSpeechEndAudio = useCallback((audio) => {
+    // Signal backend that VAD detected end of user utterance for instant flush
+    window.dispatchEvent(
+      new CustomEvent("Alita:vad_speech_end", {
+        detail: { length: audio?.length || 0 },
+      })
+    );
+  }, []);
+
   const { speechProbRef, isFallbackRmsRef, getMicVolume } = useSileroVAD({
     enabled,
+    onAudioFrame: handleAudioFrame,
+    onSpeechEndAudio: handleSpeechEndAudio,
   });
 
   // ── Stop TTS immediately (barge-in) ──────────────────────────────────────
   const stopTTS = useCallback(() => {
     audioStreamPlayer.interrupt();
-    if (!ttsPlayingRef.current) return;
+    clearTimeout(processingTimeoutRef.current);
+    const wasPlaying = ttsPlayingRef.current;
+    const wasProcessing = processingRef.current;
+    ttsPlayingRef.current = false;
+    processingRef.current = false; // allow new speech immediately
+    setMicState("active");
+
+    if (!wasPlaying && !wasProcessing) return;
 
     // ── Send barge-in context to backend ────────────────────────────────
     const partialResponse = accumulatedResponseRef.current || "";
@@ -189,9 +224,6 @@ export function AudioCapture({
     }
 
     console.log("[TTS] ⚡ Barge-in triggered — user is speaking, stopping MJ");
-    ttsPlayingRef.current = false;
-    processingRef.current = false; // allow new speech immediately
-    setMicState("active");
     onSpeechStartRef.current?.();
   }, []);
 
@@ -236,10 +268,12 @@ export function AudioCapture({
   // ── TTS event listener (seamless streaming audio queue) ─────────────
   useEffect(() => {
     audioStreamPlayer.options.onStart = () => {
+      clearTimeout(processingTimeoutRef.current);
       ttsPlayingRef.current = true;
       setMicState("speaking");
     };
     audioStreamPlayer.options.onEnd = () => {
+      clearTimeout(processingTimeoutRef.current);
       ttsPlayingRef.current = false;
       processingRef.current = false;
       setMicState("active");
@@ -248,15 +282,37 @@ export function AudioCapture({
     const handler = (e) => {
       const msg = e.detail;
       if (msg.is_final && !msg.audio_b64) {
+        // Authoritative completion: backend finished synthesis for this turn.
+        // If audio is already playing or queued, audioStreamPlayer.options.onEnd will clear processingRef when done.
+        // If NO audio was generated (silent response or empty text), clear processing state immediately.
+        if (!audioStreamPlayer.isPlaying && audioStreamPlayer.queue.length === 0) {
+          clearTimeout(processingTimeoutRef.current);
+          processingRef.current = false;
+          ttsPlayingRef.current = false;
+          setMicState("active");
+        }
         return;
       }
       audioStreamPlayer.enqueueChunk(msg);
     };
+
+    const errorHandler = () => {
+      clearTimeout(processingTimeoutRef.current);
+      processingRef.current = false;
+      ttsPlayingRef.current = false;
+      setMicState("active");
+      audioStreamPlayer.interrupt();
+    };
+
     window.addEventListener("MJ:tts_chunk", handler);
     window.addEventListener("Alita:tts_chunk", handler);
+    window.addEventListener("MJ:turn_error", errorHandler);
+    window.addEventListener("Alita:turn_error", errorHandler);
     return () => {
       window.removeEventListener("MJ:tts_chunk", handler);
       window.removeEventListener("Alita:tts_chunk", handler);
+      window.removeEventListener("MJ:turn_error", errorHandler);
+      window.removeEventListener("Alita:turn_error", errorHandler);
     };
   }, []);
 
@@ -461,6 +517,33 @@ export function AudioCapture({
         }
       }
 
+      // ── IN-FLIGHT TURN / PROCESSING GUARD ──────────────────────────────
+      // Prevents trailing recognition events or room noise from preempting the active turn
+      // while backend LLM is generating or TTS is synthesizing.
+      if (processingRef.current && !ttsPlayingRef.current) {
+        const speechProb = speechProbRef.current || 0;
+        const candidate = (interimTranscript || finalTranscript).trim();
+        const looksLikeEcho = isEcho(candidate);
+        const bargeInThreshold = isFallbackRmsRef.current ? 0.08 : 0.38;
+
+        // If user intentionally speaks a command during processing (multi-word phrase or explicit stop/cancel command):
+        const isExplicitCommand =
+          candidate.split(/\s+/).length >= 2 ||
+          /^(stop|cancel|ruko|bas|wait)$/i.test(candidate);
+
+        if (speechProb > bargeInThreshold && !looksLikeEcho && isExplicitCommand) {
+          console.log(`[STT] User interrupted during processing: "${candidate.slice(0, 40)}"`);
+          stopTTS();
+          processingRef.current = false;
+        } else {
+          // Trailing recognition fragment or ambient noise while waiting for response — ignore!
+          if (finalTranscript.trim() || interimTranscript.trim()) {
+            console.log(`[STT] Trailing STT discarded while processing: "${candidate.slice(0, 40)}" (speechProb=${speechProb.toFixed(3)})`);
+          }
+          return;
+        }
+      }
+
       // ── Live Streaming Interim Visual Feedback ─────────────────────────
       if (interimTranscript) {
         if (!userSpeakingRef.current) {
@@ -652,6 +735,19 @@ export function AudioCapture({
           userSpeakingRef.current = false;
           onUtteranceCommittedRef.current?.(fullText);
           processingRef.current = true;
+          clearTimeout(processingTimeoutRef.current);
+          // Emergency Fallback Watchdog: Only acts as a safety backstop if backend drops connection
+          // or fails to emit lifecycle completion/audio events. Normal turns complete via onStart/onEnd
+          // or is_final marker. Timeout is set to 60s to safely exceed worst-case CPU synthesis (~43s).
+          processingTimeoutRef.current = setTimeout(() => {
+            if (processingRef.current) {
+              console.warn(
+                "[STT] Emergency fallback watchdog triggered: processingRef auto-cleared after 60s (no backend completion/audio event received)"
+              );
+              processingRef.current = false;
+              setMicState("active");
+            }
+          }, 60000);
           setMicState("processing");
 
           // Force-restart recognition session to prevent Chrome's ~36s
@@ -819,86 +915,11 @@ export function AudioCapture({
     // Let onend + instance guard handle the restart (prevents duplicate starts).
   }, [enabled, sttLanguage]);
 
-  // ── Seamless Connectivity Detection & Offline PCM Streaming ─────────────
-  // Uses AudioWorklet (not deprecated ScriptProcessorNode) for PCM extraction.
-  // Sends binary Float32Array instead of JSON arrays (8× less bandwidth).
-  // Pre-warms at startup for zero-lag online↔offline switching.
-  const offlineStreamRef = useRef(null);
-  const offlineCtxRef = useRef(null);
-  const offlineWorkletRef = useRef(null); // AudioWorkletNode
-  const offlineActiveRef = useRef(false);
+  // ── Network Connectivity Detection ──────────────────────────────────────
   const connectivityDebounceRef = useRef(null);
 
   useEffect(() => {
     if (!enabled) return;
-
-    const preWarmPCMStream = async () => {
-      if (offlineCtxRef.current) return; // already warmed
-
-      try {
-        // Get mic stream early — getUserMedia is the slow part (~200-500ms)
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true },
-        });
-        offlineStreamRef.current = stream;
-
-        const ctx = new AudioContext({ sampleRate: 16000 });
-        offlineCtxRef.current = ctx;
-
-        // Register the AudioWorklet module
-        try {
-          await ctx.audioWorklet.addModule("/offlineAudioProcessor.js");
-          const workletNode = new AudioWorkletNode(ctx, "offline-audio-processor");
-          offlineWorkletRef.current = workletNode;
-
-          // Listen for PCM chunks from the worklet (runs in separate thread)
-          workletNode.port.onmessage = (e) => {
-            if (e.data.type === "pcm_chunk" && e.data.pcm) {
-              // Dispatch binary Float32Array (not JSON — 8× smaller)
-              window.dispatchEvent(
-                new CustomEvent("Alita:offline_audio_chunk", {
-                  detail: { pcm_binary: e.data.pcm.buffer }, // ArrayBuffer
-                })
-              );
-            }
-          };
-
-          const source = ctx.createMediaStreamSource(stream);
-          source.connect(workletNode);
-          workletNode.connect(ctx.destination);
-          console.log("[OFFLINE] AudioWorklet pre-warmed (zero-lag switching ready)");
-        } catch (workletErr) {
-          // Fallback to ScriptProcessorNode if AudioWorklet not supported
-          console.warn("[OFFLINE] AudioWorklet not available, using ScriptProcessor fallback:", workletErr);
-          const source = ctx.createMediaStreamSource(stream);
-          const processor = ctx.createScriptProcessor(4096, 1, 1);
-          offlineWorkletRef.current = processor;
-
-          processor.onaudioprocess = (e) => {
-            if (!offlineActiveRef.current) return;
-            const inputData = e.inputBuffer.getChannelData(0);
-            window.dispatchEvent(
-              new CustomEvent("Alita:offline_audio_chunk", {
-                detail: { pcm_binary: inputData.buffer.slice(0) }, // copy ArrayBuffer
-              })
-            );
-          };
-
-          source.connect(processor);
-          processor.connect(ctx.destination);
-          console.log("[OFFLINE] ScriptProcessor fallback pre-warmed");
-        }
-
-        // Suspend immediately if online — save CPU until needed
-        if (navigator.onLine) {
-          await ctx.suspend();
-        }
-      } catch (err) {
-        console.error("[OFFLINE] Failed to pre-warm PCM stream:", err);
-      }
-    };
-
-    preWarmPCMStream();
 
     const sendConnectivity = (online) => {
       window.dispatchEvent(
@@ -908,37 +929,12 @@ export function AudioCapture({
       );
     };
 
-    const activateOffline = async () => {
-      offlineActiveRef.current = true;
-      // Tell worklet to start sending chunks
-      if (offlineWorkletRef.current?.port) {
-        offlineWorkletRef.current.port.postMessage({ type: "set_active", active: true });
-      }
-      if (offlineCtxRef.current?.state === "suspended") {
-        await offlineCtxRef.current.resume();
-      }
-      console.log("[Connectivity] ⚡ OFFLINE mode ACTIVE — PCM streaming to Whisper");
-    };
-
-    const deactivateOffline = async () => {
-      offlineActiveRef.current = false;
-      // Tell worklet to stop sending chunks
-      if (offlineWorkletRef.current?.port) {
-        offlineWorkletRef.current.port.postMessage({ type: "set_active", active: false });
-      }
-      if (offlineCtxRef.current?.state === "running") {
-        await offlineCtxRef.current.suspend();
-      }
-      console.log("[Connectivity] ⚡ ONLINE mode ACTIVE — Web Speech API STT");
-    };
-
     // Debounced connectivity handlers
     const handleOnline = () => {
       clearTimeout(connectivityDebounceRef.current);
       connectivityDebounceRef.current = setTimeout(() => {
         console.log("[Connectivity] Back ONLINE");
         sendConnectivity(true);
-        deactivateOffline();
       }, 500);
     };
 
@@ -947,7 +943,6 @@ export function AudioCapture({
       connectivityDebounceRef.current = setTimeout(() => {
         console.log("[Connectivity] Gone OFFLINE");
         sendConnectivity(false);
-        activateOffline();
       }, 200);
     };
 
@@ -956,27 +951,12 @@ export function AudioCapture({
 
     if (!navigator.onLine) {
       sendConnectivity(false);
-      activateOffline();
     }
 
     return () => {
       clearTimeout(connectivityDebounceRef.current);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
-      offlineActiveRef.current = false;
-      if (offlineWorkletRef.current?.port) {
-        offlineWorkletRef.current.port.postMessage({ type: "set_active", active: false });
-      }
-      try {
-        offlineWorkletRef.current?.disconnect();
-        offlineStreamRef.current?.getTracks().forEach((t) => t.stop());
-        if (offlineCtxRef.current?.state !== "closed") {
-          offlineCtxRef.current?.close();
-        }
-      } catch (_) {}
-      offlineStreamRef.current = null;
-      offlineCtxRef.current = null;
-      offlineWorkletRef.current = null;
     };
   }, [enabled]);
 

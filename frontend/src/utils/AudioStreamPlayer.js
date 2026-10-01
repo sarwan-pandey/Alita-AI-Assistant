@@ -170,6 +170,8 @@ export class AudioStreamPlayer {
           this.isPlaying = false;
           this.nextStartTime = 0;
           this.options.onEnd();
+          window.dispatchEvent(new CustomEvent("MJ:tts_ended"));
+          window.dispatchEvent(new CustomEvent("Alita:tts_ended"));
         }
       };
     }
@@ -194,6 +196,8 @@ export class AudioStreamPlayer {
     if (this.isPlaying) {
       this.isPlaying = false;
       this.options.onEnd();
+      window.dispatchEvent(new CustomEvent("MJ:tts_ended"));
+      window.dispatchEvent(new CustomEvent("Alita:tts_ended"));
     }
     this.currentCmdId = null;
   }

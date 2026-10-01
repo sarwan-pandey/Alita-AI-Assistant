@@ -75,7 +75,7 @@ const rmsFromByteData = (data) => {
   return Math.sqrt(sum / data.length);
 };
 
-export function useSileroVAD({ enabled = true, speechThreshold = 0.5 } = {}) {
+export function useSileroVAD({ enabled = true, speechThreshold = 0.5, onAudioFrame, onSpeechEndAudio } = {}) {
   const [speechProb, setSpeechProb] = useState(0);
   const [isSpeechActive, setIsSpeechActive] = useState(false);
 
@@ -83,6 +83,13 @@ export function useSileroVAD({ enabled = true, speechThreshold = 0.5 } = {}) {
   const isSpeechActiveRef = useRef(false);
   const rmsRef = useRef(0);
   const isFallbackRmsRef = useRef(false);
+  const onAudioFrameRef = useRef(onAudioFrame);
+  const onSpeechEndAudioRef = useRef(onSpeechEndAudio);
+
+  useEffect(() => {
+    onAudioFrameRef.current = onAudioFrame;
+    onSpeechEndAudioRef.current = onSpeechEndAudio;
+  });
 
   const vadRef = useRef(null);
   const fallbackStreamRef = useRef(null);
@@ -184,8 +191,13 @@ export function useSileroVAD({ enabled = true, speechThreshold = 0.5 } = {}) {
           onSpeechStart: () => {
             if (!cancelled) updateSpeechState(0.99, true);
           },
-          onSpeechEnd: () => {
-            if (!cancelled) updateSpeechState(0, true);
+          onSpeechEnd: (audio) => {
+            if (!cancelled) {
+              updateSpeechState(0, true);
+              if (onSpeechEndAudioRef.current && audio) {
+                onSpeechEndAudioRef.current(audio);
+              }
+            }
           },
           onFrameProcessed: (probabilities, frame) => {
             if (cancelled) return;
@@ -194,6 +206,9 @@ export function useSileroVAD({ enabled = true, speechThreshold = 0.5 } = {}) {
             );
             rmsRef.current = rmsFromFloatFrame(frame);
             updateSpeechState(prob);
+            if (onAudioFrameRef.current && frame) {
+              onAudioFrameRef.current(frame, prob);
+            }
           },
         });
 

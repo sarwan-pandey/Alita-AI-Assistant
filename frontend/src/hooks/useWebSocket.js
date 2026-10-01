@@ -95,15 +95,19 @@ export function useWebSocket({ token, onMessage, enabled }) {
       clearTimeout(retryTimer.current);
       clearInterval(pingTimer.current);
       if (wsRef.current) {
-        if (wsRef.current.readyState === WebSocket.CONNECTING) {
-          wsRef.current.onopen = null;
-          wsRef.current.onmessage = null;
-          wsRef.current.onerror = null;
-          wsRef.current.onclose = null;
+        const socket = wsRef.current;
+        if (socket.readyState === WebSocket.CONNECTING) {
+          socket.onopen = () => {
+            try { socket.close(); } catch (_) {}
+          };
+          socket.onmessage = null;
+          socket.onerror = null;
+          socket.onclose = null;
+        } else if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.close();
+          } catch (_) {}
         }
-        try {
-          wsRef.current.close();
-        } catch (_) {}
       }
     };
   }, [token, enabled, connect]);

@@ -4132,6 +4132,20 @@ body.alita-overlay-mode .app-root {
   color: #38bdf8;
   letter-spacing: 0.5px;
   border: 1px solid rgba(56, 189, 248, 0.25);
+  transition: all 0.3s ease;
+}
+
+.island-tag.online {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.35);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.2);
+}
+
+.island-tag.offline {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.25);
 }
 
 /* ── 2. Centerpiece 3D Orb Stage ─────────────────────────────────────────── */

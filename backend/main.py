@@ -2060,6 +2060,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     # ── Accept ────────────────────────────────────────────────────────────
     await websocket.accept()
 
+    # Guard send_text against RuntimeError when client disconnects
+    _orig_ws_send_text = websocket.send_text
+    async def _safe_ws_send_text(data: str):
+        try:
+            if getattr(websocket, "client_state", None) and websocket.client_state.name != "CONNECTED":
+                return
+            await _orig_ws_send_text(data)
+        except (RuntimeError, WebSocketDisconnect):
+            pass
+        except Exception as _wse:
+            log.debug("send_text suppressed error: %s", _wse)
+    websocket.send_text = _safe_ws_send_text
+
     # ── Single session per user — kick old sessions ───────────────────────
     # If this user is already connected elsewhere, disconnect the old one
     stale_sessions = [
@@ -2081,6 +2094,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
     session_id = str(uuid.uuid4())
     session    = SessionRecord(session_id=session_id, user_id=user_id, tier=tier)  # type: ignore[call-arg]
+    session._cmd_lock = asyncio.Lock()
     # Check persistent user profile preference across sessions
     try:
         from engines.user_profile import user_profile
@@ -2136,14 +2150,36 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             len(previous_history), user_id,
         )
 
-    # ── §13a  Auto-greeting — Alita speaks first (context-aware) ─────────
+    # ── Offline STT: Whisper streaming processor (pre-loaded before greeting) ─────
+    whisper_stream_proc = None  # type: ignore[assignment]
+    offline_mode = False
+    whisper_poll_task = None  # type: ignore[assignment]
+
+    def _init_whisper_stream():
+        nonlocal whisper_stream_proc
+        if whisper_stream_proc is not None:
+            return  # already initialized
+        try:
+            from engines.whisper_streaming import WhisperStreamProcessor  # type: ignore[import]
+            if engines.whisper_model is not None:
+                whisper_stream_proc = WhisperStreamProcessor(engines.whisper_model)
+                log.info("[%s] WhisperStreamProcessor initialized (pre-loaded for instant switching)", session_id)
+            else:
+                log.warning("[%s] Cannot init WhisperStream — no Whisper model loaded", session_id)
+        except Exception as exc:
+            log.error("[%s] Failed to init WhisperStreamProcessor: %s", session_id, exc)
+
+    # Initialize Whisper STT right away so listening begins immediately without delay
+    _init_whisper_stream()
+
+    # ── §13a  Auto-greeting — Alita speaks first (context-aware & instant) ─────────
     if not session.greeted:
         session.greeted = True
         import base64 as _b64g
         import random as _rng
         from datetime import datetime as _dt_greet
 
-        # ── 1. Gather personalization context (all zero-latency local lookups) ──
+        # ── 1. Gather personalization context (zero-latency local lookups) ──
         _user_name = "there"
         _last_topic = None
         _is_returning = False
@@ -2157,8 +2193,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     break
             _summary = _em.get_last_session_summary(user_id)
             if _summary:
-                # Extract first topic (before the | separator), keep it short
                 _last_topic = _summary.split("|")[0].strip()[:80]
+                _is_returning = True
         except Exception:
             pass  # Episodic memory not available — use defaults
 
@@ -2184,44 +2220,34 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             else:
                 _time_greet = "Good evening"
 
-        # ── 4. Build contextual greeting (still template-based → zero LLM latency) ──
+        # ── 4. Build contextual greeting (short & natural -> <4s TTS on CPU) ──
         if _greet_lang == "hi":
-            if _is_returning and _last_topic:
+            if _is_returning and _user_name != "there":
                 _greet_templates = [
-                    f"{_time_greet}, {_user_name}! वापस आने पर खुशी हुई। पिछली बार हम \"{_last_topic}\" पर बात कर रहे थे — आगे बढ़ें?",
-                    f"{_time_greet}, {_user_name}! मैं MJ हूँ। पिछली बार हमने \"{_last_topic}\" discuss किया था। कुछ और मदद चाहिए?",
-                ]
-            elif _is_returning:
-                _greet_templates = [
-                    f"{_time_greet}, {_user_name}! फिर से मिलकर अच्छा लगा। बताइए, क्या मदद करूँ?",
-                    f"{_time_greet}, {_user_name}! वापस स्वागत है — बोलिए, मैं सुन रही हूँ।",
+                    f"{_time_greet}, {_user_name}!",
+                    f"वापस स्वागत है, {_user_name}!",
                 ]
             else:
                 _greet_templates = [
-                    f"{_time_greet}! मैं MJ हूँ, आपकी personal assistant। बताइए, क्या मदद करूँ?",
-                    f"{_time_greet}! MJ यहाँ — बोलिए, मैं सुन रही हूँ।",
+                    f"{_time_greet}! मैं MJ हूँ।",
+                    f"{_time_greet}! बताइए, क्या मदद करूँ?",
                 ]
         else:
-            if _is_returning and _last_topic:
+            if _is_returning and _user_name != "there":
                 _greet_templates = [
-                    f"{_time_greet}, {_user_name}! Great to see you again. Last time we were discussing \"{_last_topic}\" — want to pick up where we left off?",
-                    f"{_time_greet}, {_user_name}! Welcome back. I remember we talked about \"{_last_topic}\". How can I help today?",
-                ]
-            elif _is_returning:
-                _greet_templates = [
-                    f"{_time_greet}, {_user_name}! Welcome back — what's on your mind?",
-                    f"{_time_greet}, {_user_name}! Good to see you again. How can I help?",
+                    f"{_time_greet}, {_user_name}!",
+                    f"Welcome back, {_user_name}!",
                 ]
             else:
                 _greet_templates = [
-                    f"{_time_greet}! I'm MJ, your personal assistant. How can I help you today?",
-                    f"{_time_greet}! MJ here — ready whenever you are.",
-                    f"Hey {_user_name}! I'm MJ. What's on your mind?",
+                    f"{_time_greet}! I'm MJ.",
+                    f"Hey {_user_name}! I'm MJ.",
+                    f"{_time_greet}! How can I help?",
                 ]
 
         greeting = _rng.choice(_greet_templates)
 
-        # Send greeting text
+        # Send greeting text immediately (< 1ms)
         await websocket.send_text(json.dumps({
             "type": "llm_token",
             "session_id": session_id,
@@ -2260,17 +2286,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             },
         }))
 
-        # TTS the greeting (language-aware)
+        # Non-blocking greeting TTS background task — never blocks WebSocket receive loop
         voice_id = session.voice_id or DEFAULT_VOICE.get(_greet_lang, _default_active_voice)
         voice_info = AVAILABLE_VOICES.get(voice_id, AVAILABLE_VOICES[_default_active_voice])
-        mp3_bytes = await _tts_generate(greeting, voice_info, _greet_lang)
-        if mp3_bytes:
-            await websocket.send_text(json.dumps({
-                "type": "tts_audio",
-                "session_id": session_id,
-                "audio_b64": _b64g.b64encode(mp3_bytes).decode("ascii"),
-                "is_final": True,
-            }))
+
+        async def _play_greeting_tts(text_to_speak: str, v_info: dict, lang: str):
+            try:
+                mp3_bytes = await _tts_generate(text_to_speak, v_info, lang)
+                if mp3_bytes:
+                    await websocket.send_text(json.dumps({
+                        "type": "tts_audio",
+                        "session_id": session_id,
+                        "audio_b64": _b64g.b64encode(mp3_bytes).decode("ascii"),
+                        "is_final": True,
+                    }))
+                    log.info("[%s] Greeting TTS audio delivered (bytes=%d)", session_id, len(mp3_bytes))
+            except Exception as _gerr:
+                log.warning("[%s] Greeting TTS task failed: %s", session_id, _gerr)
+
+        asyncio.create_task(_play_greeting_tts(greeting, voice_info, _greet_lang))
 
         session.transcript_buffer += f"\nMJ: {greeting}"
         log.info("[%s] Auto-greeting sent (context-aware, lang=%s, returning=%s)", session_id, _greet_lang, _is_returning)
@@ -2323,169 +2357,528 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         session.transcript_buffer += f"\nMJ: {prompt}"
         log.info("[%s] Silence prompt sent (lang=%s)", session_id, _session_lang)
 
-    # ── Offline STT: Whisper streaming processor ──────────────────────────
-    whisper_stream_proc = None  # type: ignore[assignment]
-    offline_mode = False
-    whisper_poll_task = None  # type: ignore[assignment]
-
-    def _init_whisper_stream():
-        nonlocal whisper_stream_proc
-        if whisper_stream_proc is not None:
-            return  # already initialized
-        try:
-            from engines.whisper_streaming import WhisperStreamProcessor  # type: ignore[import]
-            if engines.whisper_model is not None:
-                whisper_stream_proc = WhisperStreamProcessor(engines.whisper_model)
-                log.info("[%s] WhisperStreamProcessor initialized (pre-loaded for instant switching)", session_id)
-            else:
-                log.warning("[%s] Cannot init WhisperStream — no Whisper model loaded", session_id)
-        except Exception as exc:
-            log.error("[%s] Failed to init WhisperStreamProcessor: %s", session_id, exc)
-
     # Lazy init: WhisperStreamProcessor created on first offline audio arrival
     # (saves ~2MB per online-only session — _init_whisper_stream() is called in audio handlers)
+
+    async def _handle_text_message(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj):
+        """Process a text query with progressive sequential TTS and active turn tracking."""
+        await _handle_text_message_inner(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj)
+
+    async def _handle_text_message_inner(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj):
+        """Inner text message handler (runs without long-lived turn lock)."""
+        import base64 as _b64t
+        import queue as _queue
+        import re as _re_sent
+        from core.turn_controller import turn_controller
+        from core.diagnostics import diagnostics, resolve_tts_engine
+
+        r_id = turn_obj.request_id
+
+        # Sentence boundary regex — split on . ! ? but skip Dr. vs. etc.
+        _SENT_END = _re_sent.compile(
+            r'(?<![A-Z][a-z])(?<!\d)(?<!\.\.)([.!?])\s+|(\n)'
+        )
+
+        try:
+            if not turn_obj.is_active():
+                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=entry",
+                            turn_obj.request_id, turn_obj.turn_id)
+                return
+
+            loop = asyncio.get_event_loop()
+            log.info("[%s] CMD #%d started: '%s'", sid, cid, text[:60])
+
+            # ── Resolve voice early ───────────────────────────────
+            detected_lang = _detect_language(text)
+            current_voice_id = sess.voice_id or DEFAULT_VOICE.get(detected_lang, _default_active_voice)
+            current_voice_info = AVAILABLE_VOICES.get(
+                current_voice_id,
+                AVAILABLE_VOICES[_default_active_voice]
+            )
+            current_lang = current_voice_info.get("lang", "en")
+
+            if not sess.manual_voice_override \
+               and detected_lang != current_lang \
+               and detected_lang in DEFAULT_VOICE:
+                new_voice_id = DEFAULT_VOICE[detected_lang]
+                new_voice_info = AVAILABLE_VOICES.get(new_voice_id, current_voice_info)
+                sess.voice_id = new_voice_id
+                log.info("CMD #%d auto-switched voice: %s → %s",
+                         cid, current_voice_info.get("name"), new_voice_info.get("name"))
+                await ws.send_text(json.dumps({
+                    "type": "voice_auto_switched",
+                    "voice_id": new_voice_id,
+                    "voice_name": new_voice_info["name"],
+                    "detected_lang": detected_lang,
+                    "stt_lang": "hi-IN" if detected_lang == "hi" else "en-IN",
+                }))
+                voice_info = new_voice_info
+            else:
+                voice_info = current_voice_info
+
+            # ── Speculative cache hit → use immediately ───────────
+            if is_spec_hit:
+                full_response = sess._spec_result  # type: ignore[attr-defined]
+                sess._spec_result = None  # type: ignore[assignment]
+                sess._spec_text = ""  # type: ignore[assignment]
+                log.info("[%s] CMD #%d ⚡ speculative hit (%d chars)", sid, cid, len(full_response))
+
+                diagnostics.on_llm_start(r_id)
+                diagnostics.on_first_token(r_id)
+                diagnostics.on_sentence_detected(r_id, 0, full_response)
+                diagnostics.on_audio_queued(r_id, 0)
+                _eng_diag = resolve_tts_engine(full_response, voice_info, settings.tts_engine_mode)
+                diagnostics.on_tts_start(r_id, 0, _eng_diag)
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=spec_pre_send",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                # Send as one token
+                await ws.send_text(json.dumps({
+                    "type": "llm_token", "session_id": sid,
+                    "token": full_response, "cmd_id": cid, "is_final": True,
+                }))
+                # Single TTS
+                mp3 = await _tts_generate(full_response, voice_info, detected_lang)
+                diagnostics.on_tts_done(r_id, 0, mp3, sid)
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | stage=spec_post_tts",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                if mp3:
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | stage=spec_pre_ws_send",
+                                    turn_obj.request_id, turn_obj.turn_id)
+                        return
+                    await ws.send_text(json.dumps({
+                        "type": "tts_audio", "session_id": sid, "cmd_id": cid,
+                        "sentence_idx": 0,
+                        "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                        "is_final": True,
+                    }))
+                    diagnostics.on_ws_send(r_id, 0, mp3, sid)
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=spec_history_save",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                async with sess._cmd_lock:  # type: ignore[attr-defined]
+                    sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
+                    save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                    save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                    memory_store(uid, f"User said: {text}")
+                    memory_store(uid, f"MJ said: {full_response}")
+                    try:
+                        from engines.knowledge_graph import knowledge_graph
+                        knowledge_graph.extract_and_store(text, user_id=uid)
+                    except Exception:
+                        pass
+                log.info("[%s] CMD #%d completed (speculative)", sid, cid)
+                turn_controller.complete_turn(sid, turn_obj.turn_id, stage="spec_complete")
+                diagnostics.on_request_complete(r_id, total_chunks=1)
+                return
+
+            # ── Classify query to decide: stream vs batch ─────────
+            sess._spec_result = None  # type: ignore[assignment]
+            sess._spec_text = ""  # type: ignore[assignment]
+
+            from decision_router import classify_query  # type: ignore[import]
+            query_type = classify_query(text)
+
+            # Realtime + automation → batch (short responses)
+            if query_type in ("realtime", "automation"):
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_llm",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                diagnostics.on_llm_start(r_id)
+                tokens_list, ws_metadata = await loop.run_in_executor(
+                    None, _llm_generate_sync, sess, text, turn_obj.cancel_event, query_type
+                )
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_post_llm",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                diagnostics.on_first_token(r_id)
+                full_response = ""
+                for i, tok in enumerate(tokens_list):
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_tokens",
+                                    turn_obj.request_id, turn_obj.turn_id)
+                        return
+                    full_response += tok
+                    await ws.send_text(json.dumps({
+                        "type": "llm_token", "session_id": sid,
+                        "token": tok, "cmd_id": cid,
+                        "is_final": (i == len(tokens_list) - 1),
+                    }))
+                    await asyncio.sleep(0)
+
+                diagnostics.on_sentence_detected(r_id, 0, full_response)
+                diagnostics.on_audio_queued(r_id, 0)
+                _eng_diag = resolve_tts_engine(full_response, voice_info, settings.tts_engine_mode)
+                diagnostics.on_tts_start(r_id, 0, _eng_diag)
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_tts",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                # Single TTS for short response
+                mp3 = await _tts_generate(full_response, voice_info, detected_lang)
+                diagnostics.on_tts_done(r_id, 0, mp3, sid)
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | stage=batch_post_tts",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                if mp3:
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_ws_send",
+                                    turn_obj.request_id, turn_obj.turn_id)
+                        return
+                    await ws.send_text(json.dumps({
+                        "type": "tts_audio", "session_id": sid, "cmd_id": cid,
+                        "sentence_idx": 0,
+                        "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                        "is_final": True,
+                    }))
+                    diagnostics.on_ws_send(r_id, 0, mp3, sid)
+
+                # Forward metadata
+                for meta_msg in ws_metadata:
+                    mt = meta_msg.get("type", "")
+                    if mt == "app_not_installed":
+                        await ws.send_text(json.dumps({
+                            "type": "app_not_installed",
+                            "app": meta_msg.get("app", ""),
+                            "store_url": meta_msg.get("store_url", ""),
+                        }))
+                    elif mt == "start_song_recognition":
+                        await ws.send_text(json.dumps({"type": "start_song_recognition"}))
+
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_history_save",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    return
+
+                async with sess._cmd_lock:  # type: ignore[attr-defined]
+                    sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
+                    save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                    save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                    memory_store(uid, f"User said: {text}")
+                    memory_store(uid, f"MJ said: {full_response}")
+                    try:
+                        from engines.knowledge_graph import knowledge_graph
+                        knowledge_graph.extract_and_store(text, user_id=uid)
+                    except Exception:
+                        pass
+
+                if getattr(sess, 'dictation_active', False):
+                    await ws.send_text(json.dumps({
+                        "type": "dictation_start",
+                        "app": getattr(sess, 'dictation_app', ''),
+                    }))
+
+                log.info("[%s] CMD #%d completed (batch/%s): %d chars", sid, cid, query_type, len(full_response))
+                turn_controller.complete_turn(sid, turn_obj.turn_id, stage="batch_complete")
+                diagnostics.on_request_complete(r_id, total_chunks=1)
+                return
+
+            # ──────────────────────────────────────────────────────
+            # GENERAL → TRUE STREAMING + SENTENCE TTS PIPELINE
+            # ──────────────────────────────────────────────────────
+            from threads.general_handler import handle_general_stream  # type: ignore[import]
+
+            if not turn_obj.is_active():
+                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_pre_llm",
+                            turn_obj.request_id, turn_obj.turn_id)
+                return
+
+            diagnostics.on_llm_start(r_id)
+            token_q: _queue.Queue = _queue.Queue()
+            system_prompt = _build_system_prompt(sess, user_text=text)
+            max_history = 15 if sess.tier == "premium" else 5
+            history = _build_history(sess, max_history)
+
+            # Start LLM streaming in a background thread with cancel_event
+            loop.run_in_executor(
+                None,
+                handle_general_stream,
+                text, sess, settings, system_prompt, history,
+                settings.llm_max_tokens if sess.tier == "premium" else settings.llm_max_tokens_free,
+                response_cache, token_q, turn_obj.cancel_event,
+            )
+
+            # ── Sentence queue for progressive sequential TTS ─────
+            sentence_q: asyncio.Queue = asyncio.Queue()
+            full_response = ""
+            sentence_buffer = ""
+            sentence_idx = 0
+
+            async def _process_sequential_tts():
+                """Synthesize sentences sequentially in arrival order without parallel engine contention."""
+                nonlocal sentence_idx
+                while True:
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=tts_queue_stale",
+                                    turn_obj.request_id, turn_obj.turn_id)
+                        break
+                    try:
+                        item = await asyncio.wait_for(sentence_q.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    if item is None:
+                        break
+
+                    s_text, s_idx = item
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=pre_tts",
+                                    turn_obj.request_id, turn_obj.turn_id, s_idx)
+                        break
+
+                    _eng_diag = resolve_tts_engine(s_text, voice_info, settings.tts_engine_mode)
+                    diagnostics.on_tts_start(r_id, s_idx, _eng_diag)
+
+                    # Synchronous TTS call in threadpool (returns naturally)
+                    mp3 = await _tts_generate(s_text, voice_info, detected_lang)
+                    diagnostics.on_tts_done(r_id, s_idx, mp3, sid)
+
+                    if not turn_obj.is_active():
+                        log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=post_tts",
+                                    turn_obj.request_id, turn_obj.turn_id, s_idx)
+                        break
+
+                    if mp3:
+                        if not turn_obj.is_active():
+                            log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=pre_ws_send",
+                                        turn_obj.request_id, turn_obj.turn_id, s_idx)
+                            break
+                        await ws.send_text(json.dumps({
+                            "type": "tts_audio",
+                            "session_id": sid,
+                            "cmd_id": cid,
+                            "sentence_idx": s_idx,
+                            "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
+                            "is_final": False,
+                        }))
+                        diagnostics.on_ws_send(r_id, s_idx, mp3, sid)
+
+            tts_worker = asyncio.create_task(_process_sequential_tts())
+
+            while True:
+                if not turn_obj.is_active():
+                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_tokens_stale",
+                                turn_obj.request_id, turn_obj.turn_id)
+                    break
+
+                # Poll queue — non-blocking get_nowait avoiding threadpool scheduling overhead
+                try:
+                    token = token_q.get_nowait()
+                except _queue.Empty:
+                    await asyncio.sleep(0.005)
+                    continue
+
+                if token is None:
+                    # Stream complete — flush remaining sentence buffer
+                    break
+
+                # Send token to frontend immediately
+                diagnostics.on_first_token(r_id)
+                full_response += token  # type: ignore[operator]
+                sentence_buffer += token  # type: ignore[operator]
+
+                if turn_obj.is_active():
+                    await ws.send_text(json.dumps({
+                        "type": "llm_token",
+                        "session_id": sid,
+                        "token": token,
+                        "cmd_id": cid,
+                        "is_final": False,
+                    }))
+
+                # Check for sentence boundary (require min length to prevent micro-chunk starvation)
+                if _SENT_END.search(sentence_buffer):  # type: ignore[union-attr]
+                    parts = _SENT_END.split(sentence_buffer)  # type: ignore[union-attr]
+                    complete = ""
+                    remainder = ""
+                    for j, p in enumerate(parts):
+                        if p is None:
+                            continue
+                        if j < len(parts) - 1:
+                            complete += p  # type: ignore[operator]
+                        else:
+                            remainder = p
+
+                    # Only dispatch early if the complete chunk is substantial enough (>= 45 chars or >= 7 words)
+                    # This ensures the synthesized audio is long enough (~3-5s) so the next chunk has time to generate
+                    if len(complete.strip()) >= 45 or len(complete.strip().split()) >= 7:
+                        diagnostics.on_sentence_detected(r_id, sentence_idx, complete.strip())
+                        diagnostics.on_audio_queued(r_id, sentence_idx)
+                        await sentence_q.put((complete.strip(), sentence_idx))
+                        sentence_idx += 1
+                        sentence_buffer = remainder
+
+            # ── Flush final sentence buffer ───────────────────────
+            if sentence_buffer.strip() and turn_obj.is_active():  # type: ignore[union-attr]
+                diagnostics.on_sentence_detected(r_id, sentence_idx, sentence_buffer.strip())
+                diagnostics.on_audio_queued(r_id, sentence_idx)
+                await sentence_q.put((sentence_buffer.strip(), sentence_idx))
+                sentence_idx += 1
+
+            # Sentinel to signal completion of sentences
+            await sentence_q.put(None)
+
+            # Send final llm_token marker
+            await ws.send_text(json.dumps({
+                "type": "llm_token",
+                "session_id": sid,
+                "token": "",
+                "cmd_id": cid,
+                "is_final": True,
+            }))
+
+            # Wait for sequential TTS worker to finish
+            await tts_worker
+
+            # If turn is no longer active, abort here — no final audio marker, no history save
+            if not turn_obj.is_active():
+                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_end_stale",
+                            turn_obj.request_id, turn_obj.turn_id)
+                return
+
+            # Send TTS final marker
+            await ws.send_text(json.dumps({
+                "type": "tts_audio",
+                "session_id": sid,
+                "cmd_id": cid,
+                "sentence_idx": sentence_idx,
+                "audio_b64": "",
+                "is_final": True,
+            }))
+
+            # ── LOCK: save to history ─────────────────────────────
+            async with sess._cmd_lock:  # type: ignore[attr-defined]
+                sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
+                save_turn(user_id=uid, role="user", content=text, session_id=sid)
+                save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
+                memory_store(uid, f"User said: {text}")
+                memory_store(uid, f"MJ said: {full_response}")
+                try:
+                    from engines.knowledge_graph import knowledge_graph
+                    knowledge_graph.extract_and_store(text, user_id=uid)
+                except Exception:
+                    pass
+
+            if getattr(sess, 'dictation_active', False):
+                await ws.send_text(json.dumps({
+                    "type": "dictation_start",
+                    "app": getattr(sess, 'dictation_app', ''),
+                }))
+
+            log.info("[%s] CMD #%d completed (stream): %d chars, %d sentences",
+                     sid, cid, len(full_response), sentence_idx)
+            turn_controller.complete_turn(sid, turn_obj.turn_id, stage="stream_complete")
+            diagnostics.on_request_complete(r_id, total_chunks=sentence_idx)
+
+        except Exception as e:
+            log.error("[%s] CMD #%d error: %s", sid, cid, e, exc_info=True)
+            turn_controller.complete_turn(sid, turn_obj.turn_id, stage="error")
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "error",
+                    "session_id": sid,
+                    "cmd_id": cid,
+                    "detail": f"Command processing error: {str(e)}",
+                }))
+            except Exception:
+                pass
+
+    async def _process_user_query(text_input: str):
+        """Unified entry point for user speech/text (Faster-Whisper STT, Web Speech API, or keyboard)."""
+        text_input = text_input.strip()
+        if not text_input:
+            return
+
+        # ── DUPLICATE STT GATE & ACTIVE TURN INITIALIZATION ──────────
+        from core.turn_controller import turn_controller
+        turn = turn_controller.start_turn(session_id, text_input)
+        if turn is None:
+            # Duplicate STT within conservative window (500-750ms) — discarded at gate
+            log.info("[%s] Duplicate STT discarded at gate: '%s'", session_id, text_input[:50])
+            return
+
+        from core.diagnostics import diagnostics, resolve_tts_engine
+        req_id = diagnostics.on_stt_received(session_id, text_input, req_id=turn.request_id)
+        session.cancel_event = turn.cancel_event
+        session.pipeline_cancel = False
+        cmd_id = turn.turn_id
+
+        # ── Check speculative cache first ─────────────────────────
+        spec_hit = False
+        from engines.speculative_engine import speculative_manager
+        has_hit, spec_res, latency_saved = speculative_manager.check_cache_hit(session, text_input)
+        if has_hit:
+            spec_hit = True
+            session._spec_result = spec_res
+            log.info(
+                "[%s] ⚡ SPECULATIVE HIT — using cached response (saved ~%.2fs latency)",
+                session_id, latency_saved
+            )
+
+        # Cancel any remaining speculative task
+        if hasattr(session, '_spec_cancel') and session._spec_cancel:
+            session._spec_cancel.set()
+
+        if not check_rate_limit(session):
+            await websocket.send_text(json.dumps({
+                "type":   "error",
+                "detail": "Rate limit reached.",
+            }))
+            turn_controller.cancel_active_turn(session_id, stage="rate_limit")
+            return
+
+        # Send user transcript back to frontend for display
+        await websocket.send_text(json.dumps({
+            "type": "user_transcript",
+            "text": text_input,
+        }))
+
+        asyncio.create_task(
+            _handle_text_message(websocket, session, user_id, session_id, text_input, spec_hit, cmd_id, turn)
+        )
 
     async def _whisper_poll_loop():
         """Periodically poll the Whisper stream processor for completed transcriptions."""
         while True:
             try:
-                await asyncio.sleep(0.1)  # poll every 100ms
+                await asyncio.sleep(0.08)  # poll every 80ms
                 if whisper_stream_proc is None:
                     continue
                 transcript = whisper_stream_proc.poll()
-                if transcript:
-                    log.info("[%s] [OFFLINE-STT] Transcribed: '%s'", session_id, transcript[:60])
-                    # Send transcript to frontend
-                    await websocket.send_text(json.dumps({
-                        "type": "user_transcript",
-                        "text": transcript,
-                    }))
-                    # Process through pipeline (create PCM from transcript is not needed —
-                    # we already have the transcript, route through text_message logic)
-                    session.transcript_buffer += f"\nUser: {transcript}"
-                    save_turn(user_id=user_id, role="user", content=transcript, session_id=session_id)
-                    memory_store(user_id, f"User said: {transcript}")
-
-                    # ── Knowledge Graph — passively extract relational facts ──
-                    try:
-                        from engines.knowledge_graph import knowledge_graph
-                        knowledge_graph.extract_and_store(transcript, user_id=user_id)
-                    except Exception:
-                        pass  # Non-critical — never block pipeline
-
-                    # ── Context injection in offline STT path with decision_router ──
-                    from decision_router import classify_query as _offline_classify  # type: ignore[import]
-                    offline_qtype = _offline_classify(transcript)
-                    log.info("[%s] [OFFLINE-STT] Query classified as: %s", session_id, offline_qtype)
-
-                    from engines.llm_engine import build_alita_context as _offline_ctx, parse_alita_response as _offline_parse, generate_face_data as _offline_face  # type: ignore[import]
-                    _offline_alita_ctx = _offline_ctx(transcript=transcript, handler_type=offline_qtype)
-
-                    loop = asyncio.get_event_loop()
-                    tokens, ws_meta = await loop.run_in_executor(
-                        None, _llm_generate_sync, session, transcript, None, offline_qtype
-                    )
-
-                    # Forward any metadata messages (e.g. app not installed, start song recognition)
-                    for meta_msg in (ws_meta or []):
-                        mt = meta_msg.get("type", "")
-                        if mt == "app_not_installed":
-                            await websocket.send_text(json.dumps({
-                                "type": "app_not_installed",
-                                "app": meta_msg.get("app", ""),
-                                "store_url": meta_msg.get("store_url", ""),
-                            }))
-                        elif mt == "start_song_recognition":
-                            await websocket.send_text(json.dumps({"type": "start_song_recognition"}))
-
-                    # Clean LLM response (strip any internal data leaks)
-                    raw_offline_resp = " ".join(tokens) if tokens else ""
-                    spoken_offline, _ = _offline_parse(raw_offline_resp)
-
-                    # Generate face_data from SER emotion (NOT from LLM)
-                    _off_emotion = getattr(session, '_last_emotion_label', 'neutral')
-                    _off_conf = getattr(session, '_last_emotion_confidence', 0.5)
-                    face_offline = _offline_face(user_emotion=_off_emotion, confidence=_off_conf)
-
-                    # Inject girlfriend mood into offline face_data
-                    if face_offline:
-                        try:
-                            from engines.relationship_manager import relationship_manager
-                            _rel = relationship_manager.state
-                            face_offline["girlfriend_mood"] = _rel.get("current_mood", "playful")
-                            face_offline["mood_intensity"] = _rel.get("mood_intensity", 0.5)
-                            face_offline["affection_score"] = _rel.get("affection_score", 75)
-                            face_offline["lie_count_today"] = _rel.get("lie_count_today", 0)
-                            face_offline["truth_count_today"] = _rel.get("truth_count_today", 0)
-                        except Exception:
-                            pass
-
-                    # Send face_data to frontend
-                    if face_offline:
-                        try:
-                            await websocket.send_text(json.dumps({
-                                "type": "face_data",
-                                "session_id": session_id,
-                                "content": face_offline,
-                            }))
-                        except Exception:
-                            pass
-
-                    # Stream spoken text only (no face data JSON)
-                    tokens_clean = [spoken_offline] if spoken_offline else []
-                    full_resp = ""
-                    for i, token in enumerate(tokens_clean):
-                        full_resp += token
-                        await websocket.send_text(json.dumps({
-                            "type": "llm_token",
-                            "session_id": session_id,
-                            "token": token,
-                            "is_final": (i == len(tokens_clean) - 1),
-                        }))
-                        await asyncio.sleep(0)
-
-                    # TTS for offline response (with engine hint)
-                    if full_resp.strip():
-                        import base64 as _b64off
-                        voice_id_off = session.voice_id or DEFAULT_VOICE.get("en", _default_active_voice)
-                        voice_info_off = AVAILABLE_VOICES.get(
-                            voice_id_off,
-                            AVAILABLE_VOICES[_default_active_voice]
-                        )
-                        # Apply tts_engine_hint from face_data only if engine is available
-                        _off_hint = face_offline.get("tts_engine_hint", "") if face_offline else ""
-                        if _off_hint:
-                            _hint_map = {"chattts": "chattts", "f5": "f5", "f5_tts": "f5", "xtts_v2": "xtts", "edge_tts": "edge"}
-                            _target = _hint_map.get(_off_hint)
-                            _eng_obj = getattr(engines, f"{_target}_engine", None) if _target else None
-                            if _eng_obj is not None and getattr(_eng_obj, "available", False):
-                                voice_info_off = dict(voice_info_off)
-                                voice_info_off["engine"] = _target
-                                log.debug("[%s] Offline TTS hint applied: %s -> %s", session_id, _off_hint, _target)
-                            else:
-                                log.debug("[%s] Offline TTS hint '%s' ignored — keeping '%s'",
-                                          session_id, _off_hint, voice_info_off.get("engine"))
-                        detected_lang = _detect_language(transcript)
-                        mp3 = await _tts_generate(full_resp, voice_info_off, detected_lang)
-                        if mp3:
-                            await websocket.send_text(json.dumps({
-                                "type": "tts_audio",
-                                "session_id": session_id,
-                                "audio_b64": _b64off.b64encode(mp3).decode("ascii"),
-                                "is_final": True,
-                            }))
-                        session.transcript_buffer += f"\nMJ: {full_resp}"
-                        save_turn(user_id=user_id, role="assistant", content=full_resp, session_id=session_id)
-
-                        # Clear barge-in context after successful response
-                        if session.interrupted_response:
-                            session.interrupted_response = ""
-                            session.interrupted_query = ""
+                if transcript and transcript.strip():
+                    log.info("[%s] [WHISPER-STT] Transcribed: '%s'", session_id, transcript[:60])
+                    await _process_user_query(transcript.strip())
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 log.error("[%s] Whisper poll error: %s", session_id, exc)
-                await asyncio.sleep(1)  # back off on errors
+                await asyncio.sleep(1)
+
+    # Pre-initialize WhisperStreamProcessor and start polling loop immediately
+    _init_whisper_stream()
+    if whisper_poll_task is None or whisper_poll_task.done():
+        whisper_poll_task = asyncio.create_task(_whisper_poll_loop())
 
     try:
         while True:
@@ -2501,10 +2894,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 last_activity = time.time()
                 continue
 
-            # ── Handle binary frames (raw PCM for offline Whisper STT) ─────
+            # ── Handle binary frames (raw PCM for streaming Whisper STT) ───
             if "bytes" in ws_msg and ws_msg["bytes"]:
-                if not offline_mode:
-                    continue  # ignore binary chunks in online mode
                 pcm_bytes = ws_msg["bytes"]
                 chunk = np.frombuffer(pcm_bytes, dtype=np.float32)
                 if len(chunk) == 0:
@@ -2553,493 +2944,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 text_input = msg.get("text", "").strip()
                 if not text_input:
                     continue
-
-                # ── DUPLICATE STT GATE & ACTIVE TURN INITIALIZATION ──────────
-                from core.turn_controller import turn_controller
-                turn = turn_controller.start_turn(session_id, text_input)
-                if turn is None:
-                    # Duplicate STT within conservative window (500-750ms) — discarded at gate
-                    continue
-
-                from core.diagnostics import diagnostics, resolve_tts_engine
-                req_id = diagnostics.on_stt_received(session_id, text_input, req_id=turn.request_id)
-                session.cancel_event = turn.cancel_event
-                session.pipeline_cancel = False
-                cmd_id = turn.turn_id
-
-                # ── Check speculative cache first ─────────────────────────
-                spec_hit = False
-                from engines.speculative_engine import speculative_manager
-                has_hit, spec_res, latency_saved = speculative_manager.check_cache_hit(session, text_input)
-                if has_hit:
-                    spec_hit = True
-                    session._spec_result = spec_res
-                    log.info(
-                        "[%s] ⚡ SPECULATIVE HIT — using cached response (saved ~%.2fs latency)",
-                        session_id, latency_saved
-                    )
-
-                # Cancel any remaining speculative task
-                if hasattr(session, '_spec_cancel') and session._spec_cancel:  # type: ignore[attr-defined]
-                    session._spec_cancel.set()  # type: ignore[union-attr]
-                if not text_input:
-                    continue
-                if not check_rate_limit(session):
-                    await websocket.send_text(json.dumps({
-                        "type":   "error",
-                        "detail": "Rate limit reached.",
-                    }))
-                    turn_controller.cancel_active_turn(session_id, stage="rate_limit")
-                    continue
-
-                loop = asyncio.get_event_loop()
-
-                # Send user transcript back to frontend for display
-                await websocket.send_text(json.dumps({
-                    "type": "user_transcript",
-                    "text": text_input,
-                }))
-
-                # Ensure session has cmd lock for persistence
-                if not hasattr(session, '_cmd_lock'):
-                    session._cmd_lock = asyncio.Lock()  # type: ignore[assignment]
-
-                async def _handle_text_message(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj):
-                    """Process a text query with progressive sequential TTS and active turn tracking."""
-                    await _handle_text_message_inner(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj)
-
-                async def _handle_text_message_inner(ws, sess, uid, sid, text, is_spec_hit, cid, turn_obj):
-                    """Inner text message handler (runs without long-lived turn lock)."""
-                    import base64 as _b64t
-                    import queue as _queue
-                    import re as _re_sent
-
-                    r_id = turn_obj.request_id
-
-                    # Sentence boundary regex — split on . ! ? but skip Dr. vs. etc.
-                    _SENT_END = _re_sent.compile(
-                        r'(?<![A-Z][a-z])(?<!\d)(?<!\.\.)([.!?])\s+|(\n)'
-                    )
-
-                    try:
-                        if not turn_obj.is_active():
-                            log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=entry",
-                                        turn_obj.request_id, turn_obj.turn_id)
-                            return
-
-                        loop = asyncio.get_event_loop()
-                        log.info("[%s] CMD #%d started: '%s'", sid, cid, text[:60])
-
-                        # ── Resolve voice early ───────────────────────────────
-                        detected_lang = _detect_language(text)
-                        current_voice_id = sess.voice_id or DEFAULT_VOICE.get(detected_lang, _default_active_voice)
-                        current_voice_info = AVAILABLE_VOICES.get(
-                            current_voice_id,
-                            AVAILABLE_VOICES[_default_active_voice]
-                        )
-                        current_lang = current_voice_info.get("lang", "en")
-
-                        if not sess.manual_voice_override \
-                           and detected_lang != current_lang \
-                           and detected_lang in DEFAULT_VOICE:
-                            new_voice_id = DEFAULT_VOICE[detected_lang]
-                            new_voice_info = AVAILABLE_VOICES.get(new_voice_id, current_voice_info)
-                            sess.voice_id = new_voice_id
-                            log.info("CMD #%d auto-switched voice: %s → %s",
-                                     cid, current_voice_info.get("name"), new_voice_info.get("name"))
-                            await ws.send_text(json.dumps({
-                                "type": "voice_auto_switched",
-                                "voice_id": new_voice_id,
-                                "voice_name": new_voice_info["name"],
-                                "detected_lang": detected_lang,
-                                "stt_lang": "hi-IN" if detected_lang == "hi" else "en-IN",
-                            }))
-                            voice_info = new_voice_info
-                        else:
-                            voice_info = current_voice_info
-
-                        # ── Speculative cache hit → use immediately ───────────
-                        if is_spec_hit:
-                            full_response = sess._spec_result  # type: ignore[attr-defined]
-                            sess._spec_result = None  # type: ignore[assignment]
-                            sess._spec_text = ""  # type: ignore[assignment]
-                            log.info("[%s] CMD #%d ⚡ speculative hit (%d chars)", sid, cid, len(full_response))
-
-                            diagnostics.on_llm_start(r_id)
-                            diagnostics.on_first_token(r_id)
-                            diagnostics.on_sentence_detected(r_id, 0, full_response)
-                            diagnostics.on_audio_queued(r_id, 0)
-                            _eng_diag = resolve_tts_engine(full_response, voice_info, settings.tts_engine_mode)
-                            diagnostics.on_tts_start(r_id, 0, _eng_diag)
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=spec_pre_send",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            # Send as one token
-                            await ws.send_text(json.dumps({
-                                "type": "llm_token", "session_id": sid,
-                                "token": full_response, "cmd_id": cid, "is_final": True,
-                            }))
-                            # Single TTS
-                            mp3 = await _tts_generate(full_response, voice_info, detected_lang)
-                            diagnostics.on_tts_done(r_id, 0, mp3, sid)
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | stage=spec_post_tts",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            if mp3:
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | stage=spec_pre_ws_send",
-                                                turn_obj.request_id, turn_obj.turn_id)
-                                    return
-                                await ws.send_text(json.dumps({
-                                    "type": "tts_audio", "session_id": sid, "cmd_id": cid,
-                                    "sentence_idx": 0,
-                                    "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
-                                    "is_final": True,
-                                }))
-                                diagnostics.on_ws_send(r_id, 0, mp3, sid)
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=spec_history_save",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            async with sess._cmd_lock:  # type: ignore[attr-defined]
-                                sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
-                                save_turn(user_id=uid, role="user", content=text, session_id=sid)
-                                save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
-                                memory_store(uid, f"User said: {text}")
-                                memory_store(uid, f"MJ said: {full_response}")
-                                try:
-                                    from engines.knowledge_graph import knowledge_graph
-                                    knowledge_graph.extract_and_store(text, user_id=uid)
-                                except Exception:
-                                    pass
-                            log.info("[%s] CMD #%d completed (speculative)", sid, cid)
-                            turn_controller.complete_turn(sid, turn_obj.turn_id, stage="spec_complete")
-                            diagnostics.on_request_complete(r_id, total_chunks=1)
-                            return
-
-                        # ── Classify query to decide: stream vs batch ─────────
-                        sess._spec_result = None  # type: ignore[assignment]
-                        sess._spec_text = ""  # type: ignore[assignment]
-
-                        from decision_router import classify_query  # type: ignore[import]
-                        query_type = classify_query(text)
-
-                        # Realtime + automation → batch (short responses)
-                        if query_type in ("realtime", "automation"):
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_llm",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            diagnostics.on_llm_start(r_id)
-                            tokens_list, ws_metadata = await loop.run_in_executor(
-                                None, _llm_generate_sync, sess, text, turn_obj.cancel_event, query_type
-                            )
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_post_llm",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            diagnostics.on_first_token(r_id)
-                            full_response = ""
-                            for i, tok in enumerate(tokens_list):
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_tokens",
-                                                turn_obj.request_id, turn_obj.turn_id)
-                                    return
-                                full_response += tok
-                                await ws.send_text(json.dumps({
-                                    "type": "llm_token", "session_id": sid,
-                                    "token": tok, "cmd_id": cid,
-                                    "is_final": (i == len(tokens_list) - 1),
-                                }))
-                                await asyncio.sleep(0)
-
-                            diagnostics.on_sentence_detected(r_id, 0, full_response)
-                            diagnostics.on_audio_queued(r_id, 0)
-                            _eng_diag = resolve_tts_engine(full_response, voice_info, settings.tts_engine_mode)
-                            diagnostics.on_tts_start(r_id, 0, _eng_diag)
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_tts",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            # Single TTS for short response
-                            mp3 = await _tts_generate(full_response, voice_info, detected_lang)
-                            diagnostics.on_tts_done(r_id, 0, mp3, sid)
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | stage=batch_post_tts",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            if mp3:
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | stage=batch_pre_ws_send",
-                                                turn_obj.request_id, turn_obj.turn_id)
-                                    return
-                                await ws.send_text(json.dumps({
-                                    "type": "tts_audio", "session_id": sid, "cmd_id": cid,
-                                    "sentence_idx": 0,
-                                    "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
-                                    "is_final": True,
-                                }))
-                                diagnostics.on_ws_send(r_id, 0, mp3, sid)
-
-                            # Forward metadata
-                            for meta_msg in ws_metadata:
-                                mt = meta_msg.get("type", "")
-                                if mt == "app_not_installed":
-                                    await ws.send_text(json.dumps({
-                                        "type": "app_not_installed",
-                                        "app": meta_msg.get("app", ""),
-                                        "store_url": meta_msg.get("store_url", ""),
-                                    }))
-                                elif mt == "start_song_recognition":
-                                    await ws.send_text(json.dumps({"type": "start_song_recognition"}))
-
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=batch_history_save",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                return
-
-                            async with sess._cmd_lock:  # type: ignore[attr-defined]
-                                sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
-                                save_turn(user_id=uid, role="user", content=text, session_id=sid)
-                                save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
-                                memory_store(uid, f"User said: {text}")
-                                memory_store(uid, f"MJ said: {full_response}")
-                                try:
-                                    from engines.knowledge_graph import knowledge_graph
-                                    knowledge_graph.extract_and_store(text, user_id=uid)
-                                except Exception:
-                                    pass
-
-                            if getattr(sess, 'dictation_active', False):
-                                await ws.send_text(json.dumps({
-                                    "type": "dictation_start",
-                                    "app": getattr(sess, 'dictation_app', ''),
-                                }))
-
-                            log.info("[%s] CMD #%d completed (batch/%s): %d chars", sid, cid, query_type, len(full_response))
-                            turn_controller.complete_turn(sid, turn_obj.turn_id, stage="batch_complete")
-                            diagnostics.on_request_complete(r_id, total_chunks=1)
-                            return
-
-                        # ──────────────────────────────────────────────────────
-                        # GENERAL → TRUE STREAMING + SENTENCE TTS PIPELINE
-                        # ──────────────────────────────────────────────────────
-                        from threads.general_handler import handle_general_stream  # type: ignore[import]
-
-                        if not turn_obj.is_active():
-                            log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_pre_llm",
-                                        turn_obj.request_id, turn_obj.turn_id)
-                            return
-
-                        diagnostics.on_llm_start(r_id)
-                        token_q: _queue.Queue = _queue.Queue()
-                        system_prompt = _build_system_prompt(sess, user_text=text)
-                        max_history = 15 if sess.tier == "premium" else 5
-                        history = _build_history(sess, max_history)
-
-                        # Start LLM streaming in a background thread with cancel_event
-                        loop.run_in_executor(
-                            None,
-                            handle_general_stream,
-                            text, sess, settings, system_prompt, history,
-                            settings.llm_max_tokens if sess.tier == "premium" else settings.llm_max_tokens_free,
-                            response_cache, token_q, turn_obj.cancel_event,
-                        )
-
-                        # ── Sentence queue for progressive sequential TTS ─────
-                        sentence_q: asyncio.Queue = asyncio.Queue()
-                        full_response = ""
-                        sentence_buffer = ""
-                        sentence_idx = 0
-
-                        async def _process_sequential_tts():
-                            """Synthesize sentences sequentially in arrival order without parallel engine contention."""
-                            nonlocal sentence_idx
-                            while True:
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=tts_queue_stale",
-                                                turn_obj.request_id, turn_obj.turn_id)
-                                    break
-                                try:
-                                    item = await asyncio.wait_for(sentence_q.get(), timeout=0.1)
-                                except asyncio.TimeoutError:
-                                    continue
-
-                                if item is None:
-                                    break
-
-                                s_text, s_idx = item
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=pre_tts",
-                                                turn_obj.request_id, turn_obj.turn_id, s_idx)
-                                    break
-
-                                _eng_diag = resolve_tts_engine(s_text, voice_info, settings.tts_engine_mode)
-                                diagnostics.on_tts_start(r_id, s_idx, _eng_diag)
-
-                                # Synchronous TTS call in threadpool (returns naturally)
-                                mp3 = await _tts_generate(s_text, voice_info, detected_lang)
-                                diagnostics.on_tts_done(r_id, s_idx, mp3, sid)
-
-                                if not turn_obj.is_active():
-                                    log.warning("[TURN] STALE_TTS_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=post_tts",
-                                                turn_obj.request_id, turn_obj.turn_id, s_idx)
-                                    break
-
-                                if mp3:
-                                    if not turn_obj.is_active():
-                                        log.warning("[TURN] STALE_AUDIO_DISCARDED | req_id=%d | turn_id=%d | idx=%d | stage=pre_ws_send",
-                                                    turn_obj.request_id, turn_obj.turn_id, s_idx)
-                                        break
-                                    await ws.send_text(json.dumps({
-                                        "type": "tts_audio",
-                                        "session_id": sid,
-                                        "cmd_id": cid,
-                                        "sentence_idx": s_idx,
-                                        "audio_b64": _b64t.b64encode(mp3).decode("ascii"),
-                                        "is_final": False,
-                                    }))
-                                    diagnostics.on_ws_send(r_id, s_idx, mp3, sid)
-
-                        tts_worker = asyncio.create_task(_process_sequential_tts())
-
-                        while True:
-                            if not turn_obj.is_active():
-                                log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_tokens_stale",
-                                            turn_obj.request_id, turn_obj.turn_id)
-                                break
-
-                            # Poll queue — non-blocking get_nowait avoiding threadpool scheduling overhead
-                            try:
-                                token = token_q.get_nowait()
-                            except _queue.Empty:
-                                await asyncio.sleep(0.005)
-                                continue
-
-                            if token is None:
-                                # Stream complete — flush remaining sentence buffer
-                                break
-
-                            # Send token to frontend immediately
-                            diagnostics.on_first_token(r_id)
-                            full_response += token  # type: ignore[operator]
-                            sentence_buffer += token  # type: ignore[operator]
-
-                            if turn_obj.is_active():
-                                await ws.send_text(json.dumps({
-                                    "type": "llm_token",
-                                    "session_id": sid,
-                                    "token": token,
-                                    "cmd_id": cid,
-                                    "is_final": False,
-                                }))
-
-                            # Check for sentence boundary (require min length to prevent micro-chunk starvation)
-                            if _SENT_END.search(sentence_buffer):  # type: ignore[union-attr]
-                                parts = _SENT_END.split(sentence_buffer)  # type: ignore[union-attr]
-                                complete = ""
-                                remainder = ""
-                                for j, p in enumerate(parts):
-                                    if p is None:
-                                        continue
-                                    if j < len(parts) - 1:
-                                        complete += p  # type: ignore[operator]
-                                    else:
-                                        remainder = p
-
-                                # Only dispatch early if the complete chunk is substantial enough (>= 45 chars or >= 7 words)
-                                # This ensures the synthesized audio is long enough (~3-5s) so the next chunk has time to generate
-                                if len(complete.strip()) >= 45 or len(complete.strip().split()) >= 7:
-                                    diagnostics.on_sentence_detected(r_id, sentence_idx, complete.strip())
-                                    diagnostics.on_audio_queued(r_id, sentence_idx)
-                                    await sentence_q.put((complete.strip(), sentence_idx))
-                                    sentence_idx += 1
-                                    sentence_buffer = remainder
-
-                        # ── Flush final sentence buffer ───────────────────────
-                        if sentence_buffer.strip() and turn_obj.is_active():  # type: ignore[union-attr]
-                            diagnostics.on_sentence_detected(r_id, sentence_idx, sentence_buffer.strip())
-                            diagnostics.on_audio_queued(r_id, sentence_idx)
-                            await sentence_q.put((sentence_buffer.strip(), sentence_idx))
-                            sentence_idx += 1
-
-                        # Sentinel to signal completion of sentences
-                        await sentence_q.put(None)
-
-                        # Send final llm_token marker
-                        await ws.send_text(json.dumps({
-                            "type": "llm_token",
-                            "session_id": sid,
-                            "token": "",
-                            "cmd_id": cid,
-                            "is_final": True,
-                        }))
-
-                        # Wait for sequential TTS worker to finish
-                        await tts_worker
-
-                        # If turn is no longer active, abort here — no final audio marker, no history save
-                        if not turn_obj.is_active():
-                            log.warning("[TURN] STALE_RESULT_DISCARDED | req_id=%d | turn_id=%d | stage=stream_end_stale",
-                                        turn_obj.request_id, turn_obj.turn_id)
-                            return
-
-                        # Send TTS final marker
-                        await ws.send_text(json.dumps({
-                            "type": "tts_audio",
-                            "session_id": sid,
-                            "cmd_id": cid,
-                            "sentence_idx": sentence_idx,
-                            "audio_b64": "",
-                            "is_final": True,
-                        }))
-
-                        # ── LOCK: save to history ─────────────────────────────
-                        async with sess._cmd_lock:  # type: ignore[attr-defined]
-                            sess.transcript_buffer += f"\nUser: {text}\nMJ: {full_response}"
-                            save_turn(user_id=uid, role="user", content=text, session_id=sid)
-                            save_turn(user_id=uid, role="assistant", content=full_response, session_id=sid)
-                            memory_store(uid, f"User said: {text}")
-                            memory_store(uid, f"MJ said: {full_response}")
-                            try:
-                                from engines.knowledge_graph import knowledge_graph
-                                knowledge_graph.extract_and_store(text, user_id=uid)
-                            except Exception:
-                                pass
-
-                        if getattr(sess, 'dictation_active', False):
-                            await ws.send_text(json.dumps({
-                                "type": "dictation_start",
-                                "app": getattr(sess, 'dictation_app', ''),
-                            }))
-
-                        log.info("[%s] CMD #%d completed (stream): %d chars, %d sentences",
-                                 sid, cid, len(full_response), sentence_idx)
-                        turn_controller.complete_turn(sid, turn_obj.turn_id, stage="stream_complete")
-                        diagnostics.on_request_complete(r_id, total_chunks=sentence_idx)
-
-                    except Exception as e:
-                        log.error("[%s] CMD #%d error: %s", sid, cid, e, exc_info=True)
-
-                asyncio.create_task(
-                    _handle_text_message(websocket, session, user_id, session_id, text_input, spec_hit, cmd_id, turn)
-                )
-
+                await _process_user_query(text_input)
                 continue
 
             # ── Audio chunk ────────────────────────────────────────────────
@@ -3052,6 +2957,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             # ── End of utterance (frontend signals VAD completion) ────────
             if msg_type == "end_of_utterance":
+                if whisper_stream_proc is not None:
+                    whisper_stream_proc.flush()
                 if len(accumulated_pcm) < settings.audio_sample_rate * 0.3:
                     # Too short (< 300ms) — probably noise, discard
                     accumulated_pcm = []
@@ -3063,10 +2970,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 )
                 continue
 
-            # ── Offline audio streaming (Whisper STT) ──────────────────────
+            # ── Audio streaming (Whisper STT) ──────────────────────────────
             if msg_type == "audio_chunk_stream":
-                if not offline_mode:
-                    continue  # ignore streaming chunks in online mode
                 pcm_data = msg.get("pcm_float32", [])
                 if not pcm_data:
                     continue
@@ -3096,17 +3001,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "detail": "Switched to local Whisper STT (offline mode)",
                     }))
                 elif not offline_mode and was_offline:
-                    # Switching back to online mode — keep processor alive for fast re-switch
-                    log.info("[%s] 📡 Switching to ONLINE mode (Web Speech API STT)", session_id)
-                    if whisper_poll_task and not whisper_poll_task.done():  # type: ignore[union-attr]
-                        whisper_poll_task.cancel()  # type: ignore[union-attr]
-                    # Don't destroy processor — just reset buffers for fast re-switch
+                    # Switching back to online mode — keep processor and poll task alive for dual-redundant STT
+                    log.info("[%s] 📡 Switching to ONLINE mode (Dual Web Speech API + Whisper STT)", session_id)
                     if whisper_stream_proc:
                         whisper_stream_proc.reset()
                     await websocket.send_text(json.dumps({
                         "type": "stt_mode",
                         "mode": "online",
-                        "detail": "Switched to Web Speech API (online mode)",
+                        "detail": "Switched to Web Speech API with Whisper backup (online mode)",
                     }))
                 continue
 

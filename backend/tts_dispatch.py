@@ -10,10 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from core.text_utils import clean_text_for_tts, _clean_text_for_tts
 
 log = logging.getLogger("alita.tts_dispatch")
+
+# Dedicated single-thread executor to prevent CPU starvation and thread pool contention
+_tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mj_tts")
 
 
 def get_or_load_turbo_engine():
@@ -69,11 +73,11 @@ async def _tts_generate(text: str, voice_info: dict, language: str = "en") -> by
         log.error("TTS FAILED: Chatterbox-Turbo engine is not available | text='%s'", text[:40])
         return b""
 
-    # Generate speech
+    # Generate speech on isolated thread executor
     loop = asyncio.get_event_loop()
     try:
         wav_bytes = await loop.run_in_executor(
-            None, engine.generate, cleaned.strip()
+            _tts_executor, engine.generate, cleaned.strip()
         )
         elapsed = time.perf_counter() - t0
 

@@ -189,7 +189,7 @@ async def local_vision(req: VisionRequest, request: Request):
 
     try:
         from ollama_client import OLLAMA_NATIVE_URL
-        vision_model = os.getenv("OLLAMA_VISION_MODEL", "qwen3:4b")
+        vision_model = os.getenv("OLLAMA_VISION_MODEL", "qwen3:4b-instruct")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(

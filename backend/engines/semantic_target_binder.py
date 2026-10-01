@@ -46,6 +46,8 @@ class SemanticTargetBinder:
         "dialer": "com.google.android.dialer",
         "phone": "com.google.android.dialer",
         "call": "com.google.android.dialer",
+        "dial": "com.google.android.dialer",
+        "ring": "com.google.android.dialer",
         "camera": "com.google.android.GoogleCamera",
         "selfie": "com.google.android.GoogleCamera",
         "gallery": "com.google.android.apps.photos",
@@ -54,6 +56,36 @@ class SemanticTargetBinder:
         "messages": "com.google.android.apps.messaging",
         "contacts": "com.google.android.contacts",
     }
+
+    # ── Action Classification Patterns (Strict Word Boundaries) ─────────────
+    ACTION_PLAY_MEDIA_RE = re.compile(
+        r"\b(?:play|bajao|chalao|songs?|music|gaana|sangeet|audio\s+track|soundtracks?|listen)\b",
+        re.IGNORECASE
+    )
+    ACTION_OPEN_APP_RE = re.compile(
+        r"\b(?:open|launch|start|kholo|khol\s+do|run)\b",
+        re.IGNORECASE
+    )
+    ACTION_CLOSE_APP_RE = re.compile(
+        r"\b(?:close|kill|quit|exit|band\s+karo|band\s+kar\s+do)\b",
+        re.IGNORECASE
+    )
+    ACTION_COMMUNICATE_RE = re.compile(
+        r"\b(?:call|dial|ring|phone\s+call|messages?|whatsapp\s+message|sms)\b",
+        re.IGNORECASE
+    )
+    ACTION_SYSTEM_CONTROL_RE = re.compile(
+        r"\b(?:unlock|lock|volume|brightness|wifi|bluetooth|silent|vibrate|screenshots?)\b",
+        re.IGNORECASE
+    )
+    ACTION_QUERY_RE = re.compile(
+        r"\b(?:battery|charge|notifications?|what's\s+on|read\s+screen|status)\b",
+        re.IGNORECASE
+    )
+    SYSTEM_CONTROL_PHONE_RE = re.compile(
+        r"\b(?:screen\s+unlock|unlock\s+phone|lock\s+phone|battery)\b",
+        re.IGNORECASE
+    )
 
     # Apps strictly belonging to PC environment
     PC_EXCLUSIVE_APPS = {
@@ -162,17 +194,17 @@ class SemanticTargetBinder:
 
         # ── Step 3: Classify Action ──────────────────────────────────────────
         action = "general"
-        if any(w in text_lower for w in ["play", "bajao", "chalao", "song", "music", "gaana", "sangeet", "track", "listen"]):
+        if self.ACTION_PLAY_MEDIA_RE.search(text_lower):
             action = "play_media"
-        elif any(w in text_lower for w in ["open", "launch", "start", "kholo", "khol do", "run"]):
+        elif self.ACTION_OPEN_APP_RE.search(text_lower):
             action = "open_app"
-        elif any(w in text_lower for w in ["close", "kill", "quit", "exit", "band karo", "band kar do"]):
+        elif self.ACTION_CLOSE_APP_RE.search(text_lower):
             action = "close_app"
-        elif any(w in text_lower for w in ["call", "dial", "ring", "phone call", "message", "whatsapp message", "sms"]):
+        elif self.ACTION_COMMUNICATE_RE.search(text_lower):
             action = "communicate"
-        elif any(w in text_lower for w in ["unlock", "lock", "volume", "brightness", "wifi", "bluetooth", "silent", "vibrate", "screenshot"]):
+        elif self.ACTION_SYSTEM_CONTROL_RE.search(text_lower):
             action = "system_control"
-        elif any(w in text_lower for w in ["battery", "charge", "notifications", "what's on", "read screen", "status"]):
+        elif self.ACTION_QUERY_RE.search(text_lower):
             action = "query"
 
         # ── Step 4: Contextual Fallback for Target Device ────────────────────
@@ -180,10 +212,10 @@ class SemanticTargetBinder:
         if target_device is None:
             if inherited_target in ("phone", "pc"):
                 target_device = inherited_target
-            elif action == "communicate" and app in ("dialer", "phone", "sms", "whatsapp"):
+            elif action == "communicate" and (app in ("dialer", "phone", "call", "dial", "ring", "sms", "whatsapp") or app is None):
                 # Communication actions default to phone companion if connected
                 target_device = "phone"
-            elif action == "system_control" and any(w in text_lower for w in ["screen unlock", "unlock phone", "lock phone", "battery"]):
+            elif action == "system_control" and self.SYSTEM_CONTROL_PHONE_RE.search(text_lower):
                 target_device = "phone"
             elif world_model_snapshot:
                 # If phone screen is lit up and user is holding phone, bias mobile

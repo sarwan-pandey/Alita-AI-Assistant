@@ -29,6 +29,8 @@ CONVERSATIONAL_EXCLUSIONS = [
     # Questions about how to do things
     r"\b(how\s+to\s+(open|close|start|write|create|delete|save|install|send|find|unlock|lock|call|dial|set\s+alarm|set\s+timer|take\s+photo))\b",
     r"\b(can\s+you\s+(explain|tell|describe|help|suggest))\b",
+    r"\b(explain|describe|clarify)\b",
+    r"\b(analyze|analyse)\s+(this|the|that|a|an)?\b",
     r"\b(what\s+(is|are|does|should|would|could|will|happens))\b",
     r"\b(do\s+you\s+(know|think|like|have|want|remember|understand))\b",
     r"\b(tell\s+me\s+(about|how|why|what|who|when|more))\b",

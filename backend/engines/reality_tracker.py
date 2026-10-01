@@ -256,6 +256,7 @@ class RealityTracker:
         """Handle immediate screen on/off/unlock broadcast from phone bridge."""
         now = time.time()
         with self._rw_lock:
+            state_changed = (self.phone_screen_on != is_screen_on) or (self.phone_is_locked != is_locked)
             self.phone_screen_on = is_screen_on
             self.phone_is_locked = is_locked
             self.phone_last_seen = now
@@ -270,14 +271,15 @@ class RealityTracker:
                     self.phone_friendly_name = friendly
                     self.phone_category = cat
 
-            self._record_event({
-                "source": "phone",
-                "type": "screen_state",
-                "screen_on": is_screen_on,
-                "is_locked": is_locked,
-                "timestamp": now,
-            })
-            log.info(f"[RealityTracker] Phone screen: on={is_screen_on}, locked={is_locked}")
+            if state_changed:
+                self._record_event({
+                    "source": "phone",
+                    "type": "screen_state",
+                    "screen_on": is_screen_on,
+                    "is_locked": is_locked,
+                    "timestamp": now,
+                })
+                log.info(f"[RealityTracker] Phone screen: on={is_screen_on}, locked={is_locked}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # PC UPDATES (query synchronously or update from ambient watcher)

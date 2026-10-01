@@ -23,9 +23,9 @@ if %errorlevel% neq 0 (
 )
 
 REM --- Step 3: Warm up the active model (Qwen3 4B Q4) ---
-echo [3/5] Warming up primary LLM (qwen3:4b) into memory...
-powershell -NoProfile -Command "try { $null = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/chat' -Method Post -ContentType 'application/json' -Body '{\"model\":\"qwen3:4b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":5,\"num_ctx\":4096}}' -TimeoutSec 60; exit 0 } catch { exit 1 }" >nul 2>&1
-echo       Model (qwen3:4b) is pinned in memory (4096 context, keep_alive=-1). Response turnaround is instant.
+echo [3/5] Warming up primary LLM (qwen3:4b-instruct) into memory...
+powershell -NoProfile -Command "try { $null = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/chat' -Method Post -ContentType 'application/json' -Body '{\"model\":\"qwen3:4b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"keep_alive\":-1,\"options\":{\"num_predict\":5,\"num_ctx\":4096}}' -TimeoutSec 60; exit 0 } catch { exit 1 }" >nul 2>&1
+echo       Model (qwen3:4b-instruct) is pinned in memory (4096 context, keep_alive=-1). Response turnaround is instant.
 
 REM --- Step 4: Ensure Frontend Dev Server is running ---
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:5173' -UseBasicParsing -TimeoutSec 1; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1

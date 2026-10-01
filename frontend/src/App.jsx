@@ -371,6 +371,12 @@ export default function App() {
         setErrorToast(msg.detail);
         setTimeout(() => setErrorToast(null), 6000);
         setIsThinking(false);
+        window.dispatchEvent(
+          new CustomEvent("Alita:turn_error", { detail: msg })
+        );
+        window.dispatchEvent(
+          new CustomEvent("MJ:turn_error", { detail: msg })
+        );
         break;
 
       case "voice_changed":
@@ -657,14 +663,25 @@ export default function App() {
         sendBinaryChunk(pcm_binary);
       }
     };
+    const ttsEndedHandler = () => {
+      setIsSpeaking(false);
+      setIsThinking(false);
+    };
+    const vadSpeechEndHandler = () => {
+      sendAudioChunk({ type: "end_of_utterance" });
+    };
     window.addEventListener("Alita:connectivity_change", connectivityHandler);
     window.addEventListener("Alita:offline_audio_chunk", offlineAudioHandler);
+    window.addEventListener("Alita:vad_speech_end", vadSpeechEndHandler);
+    window.addEventListener("MJ:tts_ended", ttsEndedHandler);
+    window.addEventListener("Alita:tts_ended", ttsEndedHandler);
 
     // ── MediaPipe Hand Gesture Control ──────────────────────────────────
     const gestureHandler = (e) => {
       const { action } = e.detail || {};
       if (action === "stop" || action === "pause") {
         window.dispatchEvent(new CustomEvent("Alita:interrupt"));
+        window.dispatchEvent(new CustomEvent("MJ:interrupt"));
         setIsSpeaking(false);
       } else if (action === "confirm" && proactiveSuggestion) {
         handleAcceptProactive(proactiveSuggestion);
@@ -677,6 +694,9 @@ export default function App() {
     return () => {
       window.removeEventListener("Alita:connectivity_change", connectivityHandler);
       window.removeEventListener("Alita:offline_audio_chunk", offlineAudioHandler);
+      window.removeEventListener("Alita:vad_speech_end", vadSpeechEndHandler);
+      window.removeEventListener("MJ:tts_ended", ttsEndedHandler);
+      window.removeEventListener("Alita:tts_ended", ttsEndedHandler);
       window.removeEventListener("Alita:gesture", gestureHandler);
     };
   }, [sendAudioChunk, sendBinaryChunk, proactiveSuggestion, handleAcceptProactive, handleDismissProactive]);
@@ -833,6 +853,7 @@ export default function App() {
               voiceActivity={userVoiceActivity}
               emotion={emotion}
               activeVoiceName={activeVoiceName}
+              isOnline={wsStatus === "open"}
               proactiveSuggestion={proactiveSuggestion}
               onAcceptProactive={handleAcceptProactive}
               onDismissProactive={handleDismissProactive}

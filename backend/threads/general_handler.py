@@ -242,7 +242,6 @@ def _try_ollama_stream(user_text: str, session, settings, system_prompt: str,
         messages = _build_messages(system_prompt, history, user_text)
         model = getattr(settings, "ollama_model", "") or get_model_name()
 
-        # Allow Ollama to isolate thinking tokens into its dedicated 'thinking' field (do NOT set think: False)
         payload = {
             "model": model,
             "messages": messages,

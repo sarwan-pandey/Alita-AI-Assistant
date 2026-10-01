@@ -19,7 +19,8 @@ import { useEffect, useRef, useCallback, useState } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 // §1  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
-const TICK_INTERVAL_MS = 500;          // Evaluate every 500ms
+const TICK_ACTIVE_MS = 500;           // Evaluate every 500ms when user is active
+const TICK_IDLE_MS = 2500;            // Evaluate every 2500ms when idle to save CPU
 const STORAGE_KEY = "alita_brain_weights";
 const TEMPORAL_WINDOW_MS = 3000;       // Look at last 3 seconds of signals
 const LEARNING_RATE = 0.05;            // How fast weights adapt
@@ -724,7 +725,7 @@ export function useCognitiveOrchestrator({ enabled = false } = {}) {
     return () => window.removeEventListener("Alita:feature_feedback", feedbackHandler);
   }, [enabled, learnOutcome]);
 
-  // ── Main evaluation loop ───────────────────────────────────────────
+  // ── Adaptive main evaluation loop ───────────────────────────────────
   useEffect(() => {
     mountedRef.current = true;
 
@@ -732,12 +733,23 @@ export function useCognitiveOrchestrator({ enabled = false } = {}) {
       return () => { mountedRef.current = false; };
     }
 
-    intervalRef.current = setInterval(evaluate, TICK_INTERVAL_MS);
-    console.log("[Brain] ✓ Cognitive Orchestrator active — evaluating every 500ms");
+    let timer = null;
+    const runTick = () => {
+      if (!mountedRef.current) return;
+      evaluate();
+      // If user is idle or sleeping, evaluate every 2500ms; if active, evaluate every 500ms
+      const currentState = stateRef.current;
+      const isIdleState = currentState === STATE.IDLE || currentState === STATE.SLEEPING;
+      const nextDelay = isIdleState ? TICK_IDLE_MS : TICK_ACTIVE_MS;
+      timer = setTimeout(runTick, nextDelay);
+    };
+
+    timer = setTimeout(runTick, TICK_ACTIVE_MS);
+    console.log("[Brain] ✓ Cognitive Orchestrator active — dynamic adaptive tick (500ms active / 2500ms idle)");
 
     return () => {
       mountedRef.current = false;
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timer) clearTimeout(timer);
     };
   }, [enabled, evaluate]);
 

@@ -293,6 +293,12 @@ class WhisperStreamProcessor:
         self._rms_history.clear()
         log.info("[WhisperStream] Reset")
 
+    def flush(self) -> None:
+        """Force transcription of any buffered audio immediately (e.g. on VAD speech end)."""
+        if self._speech_active or self._buffer_samples >= int(self.sample_rate * 0.3):
+            log.info("[WhisperStream] Flush triggered (buffer_samples=%d)", self._buffer_samples)
+            self._trigger_transcription()
+
     @property
     def is_speech_active(self) -> bool:
         """Whether speech is currently being detected."""

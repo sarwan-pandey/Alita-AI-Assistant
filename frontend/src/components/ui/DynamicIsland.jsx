@@ -25,6 +25,7 @@ export const DynamicIsland = memo(function DynamicIsland({
   proactiveSuggestion = null,
   onAcceptProactive = null,
   onDismissProactive = null,
+  isOnline = false,
   onIslandClick,
 }) {
   const [bars, setBars] = useState(Array(14).fill(0.1));
@@ -182,7 +183,9 @@ export const DynamicIsland = memo(function DynamicIsland({
         {/* Right: State Label & Voice Engine Badge */}
         <div className="island-right">
           <span className="island-status-badge">{getStatusText()}</span>
-          <div className="island-tag">OFFLINE</div>
+          <div className={`island-tag ${isOnline ? "online" : "offline"}`}>
+            {isOnline ? "ONLINE" : "OFFLINE"}
+          </div>
         </div>
       </div>
     </div>

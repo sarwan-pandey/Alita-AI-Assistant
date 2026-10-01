@@ -152,9 +152,38 @@ def handle_realtime(user_text: str, session, settings, system_prompt: str,
             expr = expr_match.group(0).strip()
             func_result = do_math(expr)
 
-    # ── Format response via LLM ───────────────────────────────────────
+    # ── Instant Natural Formatting for Voice (0ms Latency) ────────────
     if func_result:
-        # Use LLM to format the raw data into a natural response
+        # Time queries
+        if "time" in func_result and "date" in func_result:
+            t_str = func_result["time"]
+            d_str = func_result["date"]
+            if any(w in text_lower for w in ["date", "day", "tarikh"]):
+                resp_text = f"Today is {d_str}, and the time is {t_str}."
+            else:
+                resp_text = f"It's {t_str}."
+            response_cache.put(user_text, resp_text)
+            return [resp_text]
+
+        # Math queries
+        if "expression" in func_result and "result" in func_result:
+            resp_text = f"The answer is {func_result['result']}."
+            response_cache.put(user_text, resp_text)
+            return [resp_text]
+
+        # Weather queries
+        if "weather" in func_result and "city" in func_result:
+            resp_text = f"The weather in {func_result['city']} is currently {func_result['weather']}."
+            response_cache.put(user_text, resp_text)
+            return [resp_text]
+
+        # Daily briefing
+        if func_result.get("type") == "daily_briefing":
+            resp_text = f"Good day! It's {func_result['time']} in {func_result['city']}. The weather is {func_result['weather']}. Here is your thought for the day: {func_result['quote']}"
+            response_cache.put(user_text, resp_text)
+            return [resp_text]
+
+        # Fallback: format via LLM with think=False for speed
         format_prompt = f"""You are MJ, a smart voice assistant. 
 Based on this data, give a natural, concise spoken response:
 Data: {json.dumps(func_result)}
@@ -163,7 +192,7 @@ Respond naturally in 1-2 sentences:"""
 
         try:
             from ollama_client import ollama_chat  # type: ignore[import]
-            text = ollama_chat(prompt=format_prompt, max_tokens=100, temperature=0.5)
+            text = ollama_chat(prompt=format_prompt, max_tokens=100, temperature=0.5, think=False)
             if text:
                 response_cache.put(user_text, text)
                 return [text]

@@ -16,7 +16,7 @@ Usage:
     # With full control:
     client = get_client()
     resp = client.chat.completions.create(
-        model="qwen3:4b",
+        model="qwen3:4b-instruct",
         messages=[{"role": "user", "content": "Hello"}],
     )
 """
@@ -33,7 +33,7 @@ log = logging.getLogger("alita.ollama")
 # ── Configuration ────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_NATIVE_URL: str = OLLAMA_BASE_URL.replace("/v1", "")  # http://localhost:11434
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:4b")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct")
 
 # ── Performance tuning (Optimized for 4GB VRAM + 16GB RAM) ───────────────────
 # num_ctx: Context window size. 4096 for Qwen3 4B Q4.
@@ -110,11 +110,12 @@ def ollama_chat(
     max_tokens: int = 150,
     temperature: float = 0.7,
     stream: bool = False,
+    think: bool = False,
 ) -> Optional[str]:
     """
     One-liner LLM call via Ollama native API.
 
-    Uses /api/chat with think=false to disable Qwen3's internal reasoning mode.
+    Uses /api/chat with think=false by default to disable Qwen3's internal reasoning mode for speed.
     For streaming, falls back to the OpenAI-compatible API.
 
     Args:
@@ -125,6 +126,7 @@ def ollama_chat(
         max_tokens: Maximum response tokens
         temperature: Creativity (0.0 = deterministic, 1.0 = creative)
         stream: If True, returns a generator of tokens via OpenAI API
+        think: If True, enables extended chain-of-thought reasoning (slower)
 
     Returns:
         Response text string, or None on failure.
@@ -169,19 +171,20 @@ def ollama_chat(
     if not http:
         return None
 
-    # Non-streaming call: allow Ollama to isolate reasoning in 'thinking' field (do NOT set think: False)
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
-            "num_predict": max(max_tokens, 768),
+            "num_predict": max(max_tokens, 768) if think else max_tokens,
             "temperature": temperature,
             "num_ctx": OLLAMA_NUM_CTX,
             "repeat_penalty": OLLAMA_REPEAT_PENALTY,
         },
     }
+    if not think:
+        payload["think"] = False
 
     try:
         resp = http.post("/api/chat", json=payload)
