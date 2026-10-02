@@ -55,6 +55,10 @@ except Exception:
 import httpx  # type: ignore[import-untyped]
 import numpy as np  # type: ignore[import-untyped]
 import razorpay  # type: ignore[import-untyped]
+# Force NVIDIA dGPU device 0 visibility for PyTorch on Windows dual-GPU laptops
+if os.environ.get("CUDA_VISIBLE_DEVICES") in ("-1", "", None):
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import torch  # type: ignore[import-untyped]
 import uvicorn  # type: ignore[import-untyped]
 from fastapi import (  # type: ignore[import-untyped]
@@ -2383,6 +2387,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         import re as _re_sent
         from core.turn_controller import turn_controller
         from core.diagnostics import diagnostics, resolve_tts_engine
+        from core.chunk_utils import (
+            chunk_text_hard_safety,
+            OPERATIONAL_HARD_LIMIT,
+            ABSOLUTE_SAFETY_LIMIT,
+            TARGET_MIN_CHARS,
+            TARGET_MAX_CHARS,
+        )
 
         r_id = turn_obj.request_id
 
@@ -2719,34 +2730,70 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "is_final": False,
                     }))
 
-                # Check for sentence boundary (require min length to prevent micro-chunk starvation)
-                if _SENT_END.search(sentence_buffer):  # type: ignore[union-attr]
-                    parts = _SENT_END.split(sentence_buffer)  # type: ignore[union-attr]
-                    complete = ""
-                    remainder = ""
-                    for j, p in enumerate(parts):
-                        if p is None:
-                            continue
-                        if j < len(parts) - 1:
-                            complete += p  # type: ignore[operator]
-                        else:
-                            remainder = p
+                # Check for sentence boundary or operational hard limit (90 chars)
+                should_chunk = (
+                    len(sentence_buffer) >= OPERATIONAL_HARD_LIMIT or
+                    bool(_SENT_END.search(sentence_buffer))
+                )
+                if should_chunk:
+                    # If sentence boundary exists and complete chunk is within [TARGET_MIN_CHARS, OPERATIONAL_HARD_LIMIT]
+                    if _SENT_END.search(sentence_buffer):  # type: ignore[union-attr]
+                        parts = _SENT_END.split(sentence_buffer)  # type: ignore[union-attr]
+                        complete = ""
+                        remainder = ""
+                        for j, p in enumerate(parts):
+                            if p is None:
+                                continue
+                            if j < len(parts) - 1:
+                                complete += p  # type: ignore[operator]
+                            else:
+                                remainder = p
 
-                    # Only dispatch early if the complete chunk is substantial enough (>= 45 chars or >= 7 words)
-                    # This ensures the synthesized audio is long enough (~3-5s) so the next chunk has time to generate
-                    if len(complete.strip()) >= 45 or len(complete.strip().split()) >= 7:
-                        diagnostics.on_sentence_detected(r_id, sentence_idx, complete.strip())
-                        diagnostics.on_audio_queued(r_id, sentence_idx)
-                        await sentence_q.put((complete.strip(), sentence_idx))
-                        sentence_idx += 1
-                        sentence_buffer = remainder
+                        c_str = complete.strip()
+                        if 40 <= len(c_str) <= OPERATIONAL_HARD_LIMIT or (len(c_str.split()) >= 6 and len(c_str) <= OPERATIONAL_HARD_LIMIT):
+                            diagnostics.on_sentence_detected(r_id, sentence_idx, c_str)
+                            diagnostics.on_audio_queued(r_id, sentence_idx)
+                            await sentence_q.put((c_str, sentence_idx))
+                            sentence_idx += 1
+                            sentence_buffer = remainder
+                        elif len(c_str) > OPERATIONAL_HARD_LIMIT:
+                            sliced = chunk_text_hard_safety(c_str, hard_limit=OPERATIONAL_HARD_LIMIT, absolute_limit=ABSOLUTE_SAFETY_LIMIT)
+                            for sc in sliced:
+                                diagnostics.on_sentence_detected(r_id, sentence_idx, sc)
+                                diagnostics.on_audio_queued(r_id, sentence_idx)
+                                await sentence_q.put((sc, sentence_idx))
+                                sentence_idx += 1
+                            sentence_buffer = remainder
 
-            # ── Flush final sentence buffer ───────────────────────
+                    # If buffer has grown past operational limit without sentence boundary (e.g. continuous unpunctuated text)
+                    if len(sentence_buffer) >= OPERATIONAL_HARD_LIMIT:
+                        sliced = chunk_text_hard_safety(sentence_buffer, hard_limit=OPERATIONAL_HARD_LIMIT, absolute_limit=ABSOLUTE_SAFETY_LIMIT)
+                        if len(sliced) > 1:
+                            for sc in sliced[:-1]:
+                                diagnostics.on_sentence_detected(r_id, sentence_idx, sc)
+                                diagnostics.on_audio_queued(r_id, sentence_idx)
+                                await sentence_q.put((sc, sentence_idx))
+                                sentence_idx += 1
+                            sentence_buffer = sliced[-1]
+                        elif len(sliced) == 1 and len(sliced[0]) >= OPERATIONAL_HARD_LIMIT:
+                            diagnostics.on_sentence_detected(r_id, sentence_idx, sliced[0])
+                            diagnostics.on_audio_queued(r_id, sentence_idx)
+                            await sentence_q.put((sliced[0], sentence_idx))
+                            sentence_idx += 1
+                            sentence_buffer = ""
+
+            # ── Flush final sentence buffer with strict safety clamping ───
             if sentence_buffer.strip() and turn_obj.is_active():  # type: ignore[union-attr]
-                diagnostics.on_sentence_detected(r_id, sentence_idx, sentence_buffer.strip())
-                diagnostics.on_audio_queued(r_id, sentence_idx)
-                await sentence_q.put((sentence_buffer.strip(), sentence_idx))
-                sentence_idx += 1
+                final_chunks = chunk_text_hard_safety(
+                    sentence_buffer.strip(),
+                    hard_limit=OPERATIONAL_HARD_LIMIT,
+                    absolute_limit=ABSOLUTE_SAFETY_LIMIT,
+                )
+                for fc in final_chunks:
+                    diagnostics.on_sentence_detected(r_id, sentence_idx, fc)
+                    diagnostics.on_audio_queued(r_id, sentence_idx)
+                    await sentence_q.put((fc, sentence_idx))
+                    sentence_idx += 1
 
             # Sentinel to signal completion of sentences
             await sentence_q.put(None)

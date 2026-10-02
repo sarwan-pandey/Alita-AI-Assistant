@@ -230,6 +230,7 @@ def _try_ollama_stream(user_text: str, session, settings, system_prompt: str,
         from ollama_client import (  # type: ignore[import]
             OLLAMA_NATIVE_URL, get_model_name,
             OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_REPEAT_PENALTY,
+            OLLAMA_NUM_GPU,
         )
     except ImportError:
         log.error("[%s] Required modules not found!", session.session_id)
@@ -252,6 +253,7 @@ def _try_ollama_stream(user_text: str, session, settings, system_prompt: str,
                 "temperature": getattr(settings, "llm_temperature", 0.7),
                 "num_ctx": OLLAMA_NUM_CTX,
                 "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+                "num_gpu": OLLAMA_NUM_GPU,
             },
         }
 

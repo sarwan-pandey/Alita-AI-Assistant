@@ -28,6 +28,11 @@ _DEFAULT_TURBO_DIR = _PROJECT_ROOT / "tts_benchmark" / "chatterbox" / "models" /
 _DEFAULT_REF_VOICE = _PROJECT_ROOT / "backend" / "voices" / "default" / "alita_en_original.wav"
 
 
+# Operational safety constants derived from Phase 6D empirical validation
+VRAM_SAFETY_THRESHOLD_MIB: float = 3600.0
+ABSOLUTE_CHUNK_SAFETY_LIMIT: int = 100
+
+
 class TTSGenerationError(Exception):
     """Raised when speech synthesis fails in a TTS engine."""
     pass
@@ -36,7 +41,8 @@ class TTSGenerationError(Exception):
 class ChatterboxTurboEngine:
     """
     Isolated production wrapper for Chatterbox-Turbo TTS.
-    Designed for low-latency English conversational responses.
+    Designed for low-latency English conversational responses with CUDA acceleration,
+    defensive VRAM guards, and zero-crash CPU fallback.
     """
 
     def __init__(
@@ -47,6 +53,8 @@ class ChatterboxTurboEngine:
     ):
         self._lock = threading.Lock()
         self._model = None
+        self._cpu_fallback_model = None
+        self._cpu_fallback_lock = threading.Lock()
         self._initialized = False
         self._sample_rate = 24000
 
@@ -97,6 +105,66 @@ class ChatterboxTurboEngine:
         """Returns True if the engine is initialized and ready for synthesis."""
         return self._initialized and self._model is not None
 
+    def _get_cpu_fallback_model(self):
+        """Lazily initialize and condition the CPU fallback model instance."""
+        if self._cpu_fallback_model is not None:
+            return self._cpu_fallback_model
+        with self._cpu_fallback_lock:
+            if self._cpu_fallback_model is not None:
+                return self._cpu_fallback_model
+            try:
+                from chatterbox.tts_turbo import ChatterboxTurboTTS
+                log.info("Initializing Chatterbox-Turbo CPU fallback engine...")
+                t_cpu = time.perf_counter()
+                model = ChatterboxTurboTTS.from_local(self.model_dir, device="cpu")
+                model.prepare_conditionals(str(self.ref_voice_path))
+                self._cpu_fallback_model = model
+                log.info("✓ Chatterbox-Turbo CPU fallback engine loaded and conditioned in %.2fs",
+                         time.perf_counter() - t_cpu)
+                return self._cpu_fallback_model
+            except Exception as e:
+                log.error("Failed to initialize CPU fallback model: %s", e, exc_info=True)
+                return None
+
+    def _generate_cpu_fallback(
+        self,
+        clean_text: str,
+        temperature: float = 0.8,
+        repetition_penalty: float = 1.2,
+        top_p: float = 0.95,
+    ) -> bytes:
+        """Execute synthesis on CPU fallback model when CUDA is unavailable or memory unsafe."""
+        cpu_model = self._get_cpu_fallback_model()
+        if cpu_model is None:
+            raise TTSGenerationError("Chatterbox-Turbo CPU fallback engine could not be initialized")
+
+        t0 = time.perf_counter()
+        with torch.inference_mode():
+            wav = cpu_model.generate(
+                text=clean_text,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                top_p=top_p,
+            )
+
+        if wav is None or (isinstance(wav, torch.Tensor) and wav.numel() == 0):
+            raise TTSGenerationError(f"Chatterbox-Turbo CPU fallback returned empty audio tensor for '{clean_text[:40]}'")
+
+        if isinstance(wav, torch.Tensor):
+            audio_np = wav.squeeze(0).detach().cpu().numpy()
+        else:
+            audio_np = wav
+
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_np, self._sample_rate, format="WAV", subtype="PCM_16")
+        wav_bytes = buffer.getvalue()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        log.info(
+            "[FALLBACK_EVENT] Synthesized %d bytes on CPU fallback in %.1fms for '%s'",
+            len(wav_bytes), elapsed_ms, clean_text[:40]
+        )
+        return wav_bytes
+
     def generate(
         self,
         text: str,
@@ -116,6 +184,30 @@ class ChatterboxTurboEngine:
             raise TTSGenerationError("Chatterbox-Turbo engine is not initialized or unavailable")
 
         clean_text = text.strip()
+
+        # Enforce absolute safety invariant
+        if len(clean_text) > ABSOLUTE_CHUNK_SAFETY_LIMIT:
+            log.warning(
+                "[CHUNK_INVARIANT_GUARD] Chunk length %d exceeds safety limit %d! Clamping to 90 chars.",
+                len(clean_text), ABSOLUTE_CHUNK_SAFETY_LIMIT
+            )
+            clean_text = clean_text[:90].strip()
+
+        # Check VRAM safety guard if running on CUDA
+        if self.device == "cuda" and torch.cuda.is_available():
+            try:
+                alloc_mib = torch.cuda.memory_allocated() / (1024**2)
+                res_mib = torch.cuda.memory_reserved() / (1024**2)
+                log.debug("[TTS_VRAM] Pre-synthesis CUDA Alloc=%.1f MiB, Reserved=%.1f MiB", alloc_mib, res_mib)
+                if alloc_mib > VRAM_SAFETY_THRESHOLD_MIB:
+                    log.warning(
+                        "[VRAM_SAFETY_GUARD] Allocated VRAM %.1f MiB exceeds threshold %.1f MiB! Diverting to CPU fallback.",
+                        alloc_mib, VRAM_SAFETY_THRESHOLD_MIB
+                    )
+                    return self._generate_cpu_fallback(clean_text, temperature, repetition_penalty, top_p)
+            except Exception as v_err:
+                log.warning("[TTS_VRAM] VRAM telemetry check error: %s", v_err)
+
         t0 = time.perf_counter()
 
         with self._lock:
@@ -153,6 +245,14 @@ class ChatterboxTurboEngine:
                 )
                 return wav_bytes
 
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as cuda_err:
+                if self.device == "cuda":
+                    log.warning(
+                        "[CUDA_FALLBACK] CUDA synthesis failed (%s) -> gracefully falling back to CPU",
+                        cuda_err
+                    )
+                    return self._generate_cpu_fallback(clean_text, temperature, repetition_penalty, top_p)
+                raise TTSGenerationError(f"Chatterbox-Turbo synthesis failed: {cuda_err}") from cuda_err
             except TTSGenerationError:
                 raise
             except Exception as exc:

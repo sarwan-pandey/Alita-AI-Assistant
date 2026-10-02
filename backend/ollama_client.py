@@ -47,6 +47,8 @@ except ValueError:
     OLLAMA_KEEP_ALIVE = OLLAMA_KEEP_ALIVE_RAW
 # repeat_penalty: Penalizes repeated tokens. 1.1 = mild, prevents loops.
 OLLAMA_REPEAT_PENALTY: float = float(os.getenv("OLLAMA_REPEAT_PENALTY", "1.1"))
+# num_gpu: Number of model layers to offload to GPU. 0 = 100% CPU offload (preserves RTX 3050 VRAM for TTS).
+OLLAMA_NUM_GPU: int = int(os.getenv("OLLAMA_NUM_GPU", "0"))
 
 # ── Singleton clients ───────────────────────────────────────────────────────
 _client = None
@@ -158,6 +160,7 @@ def ollama_chat(
                     "options": {
                         "num_ctx": OLLAMA_NUM_CTX,
                         "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+                        "num_gpu": OLLAMA_NUM_GPU,
                     }
                 }
             )
@@ -181,6 +184,7 @@ def ollama_chat(
             "temperature": temperature,
             "num_ctx": OLLAMA_NUM_CTX,
             "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+            "num_gpu": OLLAMA_NUM_GPU,
         },
     }
     if not think:
