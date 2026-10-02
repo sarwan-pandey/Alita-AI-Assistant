@@ -12,6 +12,7 @@ build/
 venv/
 .venv/
 env/
+backend/venv_cuda/
 
 # ── Environment / Secrets ─────────────────────────
 .env
