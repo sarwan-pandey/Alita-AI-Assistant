@@ -26,24 +26,9 @@ _tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mj_tts")
 
 
 def get_or_load_turbo_engine():
-    """Load or retrieve singleton Chatterbox Turbo engine."""
-    from main import engines, settings
-    if engines.chatterbox_turbo_engine is None:
-        try:
-            from engines.resource_guard import resource_guard
-            with resource_guard.loading("ChatterboxTurbo", estimated_mb=800):
-                from engines.tts_chatterbox_turbo import ChatterboxTurboEngine
-                log.info("Loading Chatterbox-Turbo engine on %s...", settings.device)
-                engines.chatterbox_turbo_engine = ChatterboxTurboEngine(device=settings.device)
-                if engines.chatterbox_turbo_engine.available:
-                    log.info("✓ Chatterbox-Turbo engine loaded successfully")
-                else:
-                    log.error("✗ Chatterbox-Turbo engine failed to initialize")
-                    engines.chatterbox_turbo_engine = None
-        except Exception as exc:
-            log.error("Failed to load Chatterbox-Turbo: %s", exc, exc_info=True)
-            engines.chatterbox_turbo_engine = None
-    return engines.chatterbox_turbo_engine
+    """Load or retrieve singleton Chatterbox Turbo engine via provider orchestrator."""
+    from engines.provider_orchestrator import get_provider_orchestrator
+    return get_provider_orchestrator().get_tts_engine()
 
 
 def get_or_load_multilingual_engine():
@@ -69,6 +54,17 @@ async def _tts_generate(text: str, voice_info: dict, language: str = "en") -> by
     cleaned = _clean_text_for_tts(text, preserve_oral_tags=True)
     if not cleaned or not cleaned.strip():
         return b""
+
+    # Check if primary TTS provider (Chatterbox Multilingual) via provider orchestrator is enabled and ready
+    try:
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
+        if orch.is_provider_ready("tts", "chatterbox_multilingual"):
+            primary_wav = await orch.synthesize(clean_str, voice=voice_id, language=language)
+            if primary_wav and len(primary_wav) > 44:
+                return primary_wav
+    except Exception as orch_err:
+        log.warning("[tts_dispatch] Orchestrator synthesis error: %s. Falling back to local engine.", orch_err)
 
     # Ensure engine is loaded
     engine = engines.chatterbox_turbo_engine

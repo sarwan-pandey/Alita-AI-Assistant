@@ -89,6 +89,9 @@ from ws_handler import (
     handle_cancel_speculative,
 )
 
+# Proactive silence prompt gate (disabled by default during diagnostics/testing)
+ENABLE_PROACTIVE_SILENCE: bool = os.getenv("ENABLE_PROACTIVE_SILENCE", "false").lower() in ("true", "1", "yes")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §0  FFMPEG SETUP (must run before pydub/shazamio imports)
@@ -271,15 +274,43 @@ class Settings(BaseSettings):
     tts_preload_turbo: bool = True
     tts_preload_multilingual: bool = False
 
+    # ── Provider Abstraction Configuration ────────────────────────────────
+    # These fields control which provider is ACTIVE for each subsystem.
+    # Defaults are the current local production providers.
+    # Changing these to NVIDIA providers is a FUTURE migration step.
+    # DO NOT change these values until migration Phase 2+ is approved.
+    llm_provider_active: str = "qwen_local"         # qwen_local | nemotron_lightning | nemotron_super
+    tts_provider_active: str = "chatterbox_local"    # chatterbox_local | chatterbox_multilingual_nim
+    vision_provider_active: str = "moondream_local"  # moondream_local | gemma_4_31b
+    nvidia_nim_tts_url: str = ""                     # Self-hosted NIM TTS endpoint (blank = cloud)
+
+    # ── NVIDIA Fallback & Resilience Feature Flags (P0) ────────────────────
+    enable_nvidia_llm: bool = False
+    enable_nvidia_tts: bool = False
+    enable_nvidia_vision: bool = False
+    nvidia_llm_timeout: float = 5.0
+    nvidia_tts_timeout: float = 4.0
+    nvidia_vision_timeout: float = 5.0
+
+    # ── NVIDIA-First Primary / Fallback Configuration (P1) ────────────────
+    llm_primary: str = "nemotron_lightning"
+    llm_fallback: str = "qwen_local"
+    tts_primary: str = "chatterbox_multilingual"
+    tts_fallback: str = "chatterbox_turbo"
+    vision_primary: str = "gemma4"
+    vision_fallback: str = "moondream"
+
+
 
 settings = Settings()
 _all_keys = settings.get_all_gemini_keys()
 try:
-    from ollama_client import get_model_name, is_ollama_running
-    _ollama_model = get_model_name()
-    _ollama_status = "online" if is_ollama_running() else "offline"
-    log.info("Device: %s | Primary LLM: Ollama %s (%s) | Gemini Fallback Keys: %d loaded",
-             settings.device, _ollama_model, _ollama_status, len(_all_keys))
+    from engines.provider_orchestrator import get_provider_orchestrator
+    _orch = get_provider_orchestrator()
+    _active_model = _orch.get_active_model_name("llm")
+    _active_status = "online" if _orch.is_llm_ready() else "offline"
+    log.info("Device: %s | Active LLM: %s (%s) | Gemini Fallback Keys: %d loaded",
+             settings.device, _active_model, _active_status, len(_all_keys))
 except Exception:
     log.info("Device: %s | Gemini Keys: %d loaded", settings.device, len(_all_keys))
 
@@ -571,16 +602,14 @@ def _load_engines_sync() -> None:
     except Exception as exc:
         log.error("✗ Failed to load Wav2Vec2: %s", exc)
 
-    # ── §5d  Chatterbox Turbo — Sole Production Voice Engine ──────────────
+    # ── §5d  Voice Engine Initialization via Provider Orchestrator ──────
     try:
-        from engines.resource_guard import resource_guard
-        with resource_guard.loading("ChatterboxTurbo", estimated_mb=800):
-            from engines.tts_chatterbox_turbo import ChatterboxTurboEngine
-            engines.chatterbox_turbo_engine = ChatterboxTurboEngine()
-            if engines.chatterbox_turbo_engine.available:
-                log.info("✓ Chatterbox-Turbo engine loaded (sole TTS: chatterbox_turbo_mj)")
-            else:
-                log.error("✗ Chatterbox-Turbo engine failed to initialize")
+        from engines.provider_orchestrator import get_provider_orchestrator
+        engines.chatterbox_turbo_engine = get_provider_orchestrator().get_tts_engine()
+        if engines.chatterbox_turbo_engine and engines.chatterbox_turbo_engine.available:
+            log.info("✓ Chatterbox-Turbo engine loaded (sole TTS: chatterbox_turbo_mj)")
+        else:
+            log.error("✗ Chatterbox-Turbo engine failed to initialize")
     except Exception as exc:
         log.error("✗ Failed to load Chatterbox-Turbo: %s", exc, exc_info=True)
         engines.chatterbox_turbo_engine = None
@@ -628,6 +657,43 @@ async def lifespan(app: FastAPI):
         log.info("✓ Proactive situational sentinel started.")
     except Exception as exc:
         log.warning("Proactive agent startup notice: %s", exc)
+
+    # Configure real-time phone notification dispatcher callbacks
+    try:
+        from engines.notification_dispatcher import notification_dispatcher
+        _main_loop = asyncio.get_running_loop()
+
+        def _broadcast_phone_notification(alert_dict: dict):
+            for sid, ws in list(_session_websockets.items()):
+                try:
+                    payload = json.dumps(alert_dict)
+                    asyncio.run_coroutine_threadsafe(ws.send_text(payload), _main_loop)
+                except Exception:
+                    pass
+
+        def _broadcast_phone_audio(wav_bytes: bytes, text_spoken: str):
+            import base64 as _b64
+            # Send TTS chunk to the primary active session
+            for sid, ws in list(_session_websockets.items()):
+                try:
+                    payload = json.dumps({
+                        "type": "tts_audio",
+                        "session_id": sid,
+                        "cmd_id": 0,
+                        "sentence_idx": 0,
+                        "audio_b64": _b64.b64encode(wav_bytes).decode("ascii"),
+                        "is_final": True,
+                    })
+                    asyncio.run_coroutine_threadsafe(ws.send_text(payload), _main_loop)
+                except Exception:
+                    pass
+
+        notification_dispatcher.set_desktop_broadcaster(_broadcast_phone_notification)
+        notification_dispatcher.set_audio_broadcaster(_broadcast_phone_audio)
+        notification_dispatcher.set_session_provider(lambda: list(_session_websockets.keys()))
+        log.info("✓ Phone notification dispatcher registered.")
+    except Exception as exc:
+        log.warning("Phone notification dispatcher registration notice: %s", exc)
 
     # Start background reminder checker
     reminder_task = asyncio.create_task(_reminder_checker())
@@ -1443,14 +1509,13 @@ def _llm_generate_sync(session: SessionRecord, user_text: str, cancel_event=None
                 if needs_tools:
                     try:
                         from engines.tool_orchestrator import ToolOrchestrator
-                        from ollama_client import ollama_chat_messages, get_model_name
+                        from engines.provider_orchestrator import get_provider_orchestrator
 
                         async def _orchestrator_llm(messages):
-                            model = getattr(settings, "ollama_model", "") or get_model_name()
+                            orch = get_provider_orchestrator()
                             return await asyncio.to_thread(
-                                ollama_chat_messages,
+                                orch.chat,
                                 messages=messages,
-                                model=model,
                                 max_tokens=max_tokens,
                                 temperature=getattr(settings, "llm_temperature", 0.7),
                             )
@@ -1909,8 +1974,7 @@ async def run_full_pipeline(
         # Map hint names to engine types registered in EngineRegistry
         _hint_to_engine = {
             "chattts": "chattts",
-            "f5": "f5",
-            "f5_tts": "f5",
+            "chatterbox_turbo": "chatterbox_turbo",
             "xtts_v2": "xtts",
             "edge_tts": "edge",
         }
@@ -2028,7 +2092,7 @@ async def run_full_pipeline(
 
     if not any_audio and full_response.strip():
         log.warning(
-            "[%s] TTS returned empty for all sentences — verify ChatTTS/F5-TTS engine availability "
+            "[%s] TTS returned empty for all sentences — verify Chatterbox/TTS engine availability "
             "and check voice_info engine type (current voice_id=%s).",
             session.session_id,
             session.voice_id or "default",
@@ -2335,6 +2399,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
     # ── Message loop (with silence detection) ──────────────────────────────
     import random as _rng_loop
+    ENABLE_PROACTIVE_SILENCE = os.getenv("ENABLE_PROACTIVE_SILENCE", "false").lower() in ("true", "1", "yes")
     SILENCE_TIMEOUT = 90  # seconds of silence before proactive prompt
     silence_prompts_en = [
         "Hey, you've been quiet for a while. Everything okay?",
@@ -2938,8 +3003,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     continue
                 transcript = whisper_stream_proc.poll()
                 if transcript and transcript.strip():
-                    log.info("[%s] [WHISPER-STT] Transcribed: '%s'", session_id, transcript[:60])
-                    await _process_user_query(transcript.strip())
+                    from engines.whisper_streaming import validate_whisper_transcript
+                    cleaned = transcript.strip()
+                    is_valid, reason = validate_whisper_transcript(cleaned)
+                    if not is_valid:
+                        log.warning("[%s] [WHISPER-STT] Rejected invalid transcript '%s' (reason: %s)", session_id, cleaned[:60], reason)
+                        continue
+                    log.info("[%s] [WHISPER-STT] Transcribed: '%s'", session_id, cleaned[:60])
+                    await _process_user_query(cleaned)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -2954,14 +3025,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
         while True:
             try:
-                ws_msg = await asyncio.wait_for(
-                    websocket.receive(),
-                    timeout=SILENCE_TIMEOUT,
-                )
+                if ENABLE_PROACTIVE_SILENCE:
+                    ws_msg = await asyncio.wait_for(
+                        websocket.receive(),
+                        timeout=SILENCE_TIMEOUT,
+                    )
+                else:
+                    ws_msg = await websocket.receive()
                 last_activity = time.time()
             except asyncio.TimeoutError:
-                # User has been silent — send proactive prompt
-                await _send_silence_prompt()
+                # User has been silent — send proactive prompt (if enabled)
+                if ENABLE_PROACTIVE_SILENCE:
+                    await _send_silence_prompt()
+                else:
+                    log.debug("[%s] Silence timeout reached (proactive prompt gated)", session_id)
                 last_activity = time.time()
                 continue
 

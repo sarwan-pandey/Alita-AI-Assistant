@@ -28,6 +28,10 @@ export class AudioStreamPlayer {
     this.isDecoding = false;
     this.analyser = null;
     this._freqData = null;
+    this.hasReceivedFinal = false;
+    this._watchdogTimer = null;
+    this._seqCounter = 0;
+    this.currentCmdId = null;
   }
 
   _initContext() {
@@ -78,7 +82,18 @@ export class AudioStreamPlayer {
    * @param {Object} chunk - { audio_b64, sentence_idx, cmd_id, is_final, is_filler }
    */
   async enqueueChunk(chunk) {
-    if (!chunk || !chunk.audio_b64) return;
+    if (!chunk) return;
+
+    // Handle end-of-turn final marker without audio
+    if (chunk.is_final && !chunk.audio_b64) {
+      this.hasReceivedFinal = true;
+      if (this.activeSources.size === 0 && this.queue.length === 0) {
+        this._triggerEnd();
+      }
+      return;
+    }
+
+    if (!chunk.audio_b64) return;
 
     // If new command arrives without explicit interrupt, flush older command queue
     if (chunk.cmd_id !== undefined && this.currentCmdId !== null && chunk.cmd_id !== this.currentCmdId) {
@@ -86,6 +101,17 @@ export class AudioStreamPlayer {
     }
     this.currentCmdId = chunk.cmd_id ?? this.currentCmdId;
 
+    if (chunk.is_final) {
+      this.hasReceivedFinal = true;
+    }
+
+    // Cancel pending jitter watchdog since new audio chunk has arrived
+    if (this._watchdogTimer) {
+      clearTimeout(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
+
+    const chunkSeq = this._seqCounter++;
     const ctx = this._initContext();
 
     try {
@@ -106,13 +132,17 @@ export class AudioStreamPlayer {
       this.queue.push({
         audioBuffer,
         sentence_idx: sIdx,
+        seq: chunkSeq,
         cmd_id: chunk.cmd_id,
         is_final: chunk.is_final ?? false,
         is_filler: chunk.is_filler ?? false,
       });
 
-      // Sort queue by sentence index to guarantee sequential playback
-      this.queue.sort((a, b) => a.sentence_idx - b.sentence_idx);
+      // Sort queue by sentence index and arrival sequence to guarantee sequential playback
+      this.queue.sort((a, b) => {
+        if (a.sentence_idx !== b.sentence_idx) return a.sentence_idx - b.sentence_idx;
+        return a.seq - b.seq;
+      });
 
       // Schedule buffered audio
       this._scheduleQueue();
@@ -167,13 +197,35 @@ export class AudioStreamPlayer {
       source.onended = () => {
         this.activeSources.delete(source);
         if (this.activeSources.size === 0 && this.queue.length === 0) {
-          this.isPlaying = false;
-          this.nextStartTime = 0;
-          this.options.onEnd();
-          window.dispatchEvent(new CustomEvent("MJ:tts_ended"));
-          window.dispatchEvent(new CustomEvent("Alita:tts_ended"));
+          if (this.hasReceivedFinal) {
+            this._triggerEnd();
+          } else {
+            // Normal generation/network jitter grace window:
+            // Do not prematurely fire tts_ended or reset nextStartTime while next chunk is generating
+            if (this._watchdogTimer) clearTimeout(this._watchdogTimer);
+            this._watchdogTimer = setTimeout(() => {
+              if (this.activeSources.size === 0 && this.queue.length === 0) {
+                this._triggerEnd();
+              }
+            }, 2000);
+          }
         }
       };
+    }
+  }
+
+  _triggerEnd() {
+    if (this._watchdogTimer) {
+      clearTimeout(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
+    if (this.isPlaying) {
+      this.isPlaying = false;
+      this.nextStartTime = 0;
+      this.hasReceivedFinal = false;
+      this.options.onEnd();
+      window.dispatchEvent(new CustomEvent("MJ:tts_ended"));
+      window.dispatchEvent(new CustomEvent("Alita:tts_ended"));
     }
   }
 
@@ -182,6 +234,12 @@ export class AudioStreamPlayer {
    * Drops all playing and queued sounds within 5ms without audible speaker pop.
    */
   interrupt() {
+    if (this._watchdogTimer) {
+      clearTimeout(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
+    this.hasReceivedFinal = false;
+
     for (const source of this.activeSources) {
       try {
         source.stop();

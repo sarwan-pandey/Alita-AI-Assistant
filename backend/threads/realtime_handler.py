@@ -191,13 +191,18 @@ User asked: "{user_text}"
 Respond naturally in 1-2 sentences:"""
 
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
-            text = ollama_chat(prompt=format_prompt, max_tokens=100, temperature=0.5, think=False)
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
+            text = orch.chat(
+                messages=[{"role": "user", "content": format_prompt}],
+                max_tokens=100,
+                temperature=0.5,
+            )
             if text:
                 response_cache.put(user_text, text)
                 return [text]
         except Exception as e:
-            log.warning("Ollama format failed: %s", e)
+            log.warning("Realtime LLM format failed: %s", e)
 
         # Fallback: return raw data
         return [str(func_result)]

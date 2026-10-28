@@ -3905,7 +3905,8 @@ def navigate_ui(target: str, settings=None) -> dict:
         # ── LLM-based element selection (most accurate) ────────────────
         best_match = None
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
 
             # Build element list for LLM
             elem_list = "\n".join(
@@ -3930,7 +3931,7 @@ RULES:
 
 Reply with ONLY the index number (e.g. "5") or "NONE"."""
 
-            answer = ollama_chat(prompt=pick_prompt, max_tokens=10, temperature=0.0)
+            answer = orch.chat(messages=[{"role": "user", "content": pick_prompt}], max_tokens=10, temperature=0.0)
 
             if answer and answer.strip().upper() != "NONE":
                 try:
@@ -4275,9 +4276,10 @@ def send_whatsapp_message(contact: str, message: str, settings=None) -> dict:
 
     if intent_prompt:
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
             prompt = intent_prompt.format(contact=contact_str) + " Reply with ONLY the message text, nothing else."
-            ai_msg = ollama_chat(prompt=prompt, max_tokens=60, temperature=0.8)
+            ai_msg = orch.chat(messages=[{"role": "user", "content": prompt}], max_tokens=60, temperature=0.8)
             if ai_msg:
                 msg_str = ai_msg.strip('"').strip("'")
         except Exception:
@@ -4973,7 +4975,8 @@ def send_file_with_message(contact: str, file_name: str,
     message = custom_message
     if (compose_message or not message):
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
             compose_prompt = (
                 f"Write a short, friendly 1-sentence message to accompany sending "
                 f"the file '{actual_name}' to someone named '{contact}'. "
@@ -4985,7 +4988,7 @@ def send_file_with_message(contact: str, file_name: str,
                     f"describe what it likely contains based on its name/type. "
                     f"Keep it under 2 sentences, friendly tone."
                 )
-            ai_msg = ollama_chat(prompt=compose_prompt, max_tokens=80, temperature=0.7)
+            ai_msg = orch.chat(messages=[{"role": "user", "content": compose_prompt}], max_tokens=80, temperature=0.7)
             if ai_msg:
                 message = ai_msg
         except Exception:
@@ -5247,12 +5250,53 @@ def _fast_parse_automation_command(user_text: str) -> dict | None:
         info = _extract_whatsapp_info(user_text)
         return {"action": "send_whatsapp", "contact": info["contact"], "message": info["message"]}
 
+    # 9. Phone Telephony Actions (Deterministic Fast-Path)
+    if any(w in lower for w in [
+        "answer call", "answer the call", "accept call", "accept the call",
+        "pick up the call", "pick up call", "receive call", "receive the call",
+        "phone uthao", "call uthao", "phone pick karo"
+    ]) or lower in ("answer", "pick up"):
+        return {"action": "phone_answer_call"}
+
+    if any(w in lower for w in [
+        "reject call", "reject the call", "decline call", "decline the call",
+        "phone kato", "call kato", "call cancel karo", "call drop karo"
+    ]) or lower in ("reject", "decline"):
+        return {"action": "phone_reject_call"}
+
+    if any(w in lower for w in [
+        "end call", "hang up", "cut the call", "cut call", "call end",
+        "call kat", "call kaat", "disconnect call"
+    ]) or lower == "hang up":
+        return {"action": "phone_end_call"}
+
+    if any(lower.startswith(prefix) for prefix in ["call ", "dial ", "phone call "]):
+        cm = re.search(r'^(?:call|dial|phone call)\s+(?:to\s+)?(.+)', lower)
+        target = cm.group(1).strip() if cm else ""
+        target = re.sub(r'\s+(?:on|from)\s+(?:my\s+)?(?:phone|mobile|android)$', '', target).strip()
+        target = re.sub(r'^(?:to|for)\s+', '', target).strip()
+        digits = re.sub(r'[^0-9+]', '', target)
+        if len(digits) >= 7:
+            return {"action": "phone_make_call", "number": digits}
+        else:
+            return {"action": "phone_make_call", "contactName": target.title()}
+
     return None
 
 def _normalize_automation_action(data: dict, user_text: str = "") -> dict:
     if not isinstance(data, dict):
         return {"action": "unknown"}
     action = data.get("action", "").lower().strip()
+
+    # Guard against "call <name>" / "dial <name>" parsed as open_app
+    if action == "open_app" and any(user_text.lower().strip().startswith(p) for p in ["call ", "dial "]):
+        cm = re.search(r'^(?:call|dial)\s+(?:to\s+)?(.+)', user_text.lower().strip())
+        target = cm.group(1).strip() if cm else ""
+        target = re.sub(r'\s+(?:on|from)\s+(?:my\s+)?(?:phone|mobile|android)$', '', target).strip()
+        digits = re.sub(r'[^0-9+]', '', target)
+        if len(digits) >= 7:
+            return {"action": "phone_make_call", "number": digits}
+        return {"action": "phone_make_call", "contactName": target.title()}
 
     # Map open_<app> -> open_app
     if action.startswith("open_") and action not in ("open_app", "open_folder", "open_url", "open_music"):
@@ -5494,6 +5538,18 @@ def _phone_action(action_type: str, data: dict, session) -> dict:
             if result.get("success"):
                 return {"status": "success", "detail": "📴 Call ended."}
             return {"status": "error", "detail": f"Could not end call: {result.get('error', 'unknown')}"}
+
+        elif action_type == "answer_call":
+            result = _run_async(phone_orchestrator.answer_call())
+            if result.get("success"):
+                return {"status": "success", "detail": "📞 Call answered."}
+            return {"status": "error", "detail": f"Could not answer call: {result.get('error', 'unknown')}"}
+
+        elif action_type == "reject_call":
+            result = _run_async(phone_orchestrator.reject_call())
+            if result.get("success"):
+                return {"status": "success", "detail": "📴 Call rejected."}
+            return {"status": "error", "detail": f"Could not reject call: {result.get('error', 'unknown')}"}
 
         elif action_type == "send_sms":
             import re
@@ -5861,8 +5917,9 @@ User command: "{user_text}"
 JSON:"""
 
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
-            raw = ollama_chat(prompt=parse_prompt, max_tokens=200, temperature=0.1)
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
+            raw = orch.chat(messages=[{"role": "user", "content": parse_prompt}], max_tokens=200, temperature=0.1)
             if raw:
                 json_match = re.search(r'\{.*\}', raw, re.DOTALL)
                 if json_match:
@@ -6328,25 +6385,41 @@ JSON:"""
                                             "phone pe kya hai", "phone pe dikhao", "phone pe dekho"]):
             action_data = {"action": "phone_read_screen"}
 
-        # ── Phone Call ────────────────────────────────────────────────────
+        # ── Phone Call Answering / Rejecting / Ending ─────────────────────
+        elif any(w in text_lower for w in [
+            "answer call", "answer the call", "accept call", "accept the call",
+            "pick up the call", "pick up call", "pick up", "receive call", "receive the call",
+            "phone uthao", "call uthao", "phone pick karo"
+        ]):
+            action_data = {"action": "phone_answer_call"}
+
+        elif any(w in text_lower for w in [
+            "reject call", "reject the call", "decline call", "decline the call",
+            "phone kato", "call kato", "call cancel karo", "call drop karo"
+        ]):
+            action_data = {"action": "phone_reject_call"}
+
+        elif any(w in text_lower for w in ["end call", "hang up", "cut the call", "call end",
+                                            "call kat", "call kaat", "disconnect call"]):
+            action_data = {"action": "phone_end_call"}
+
+        # ── Outbound Phone Call ───────────────────────────────────────────
         elif any(w in text_lower for w in ["call ", "phone call", "dial ", "ring ",
                                             "call karo", "call laga", "phone karo",
                                             "make a call", "make call"]):
             import re as _re
-            cm = _re.search(r'(?:call|dial|ring|phone karo|call karo|call laga)\s+(.+)', text_lower)
+            cm = _re.search(r'(?:call|dial|ring|phone karo|call karo|call laga)\s+(?:to\s+)?(.+)', text_lower)
             target = cm.group(1).strip() if cm else ""
             # Strip trailing "on phone" / "on mobile"
             target = _re.sub(r'\s+(?:on|from)\s+(?:my\s+)?(?:phone|mobile|android)$', '', target).strip()
+            # Clean leading prepositions
+            target = _re.sub(r'^(?:to|for)\s+', '', target).strip()
             # Check if it looks like a phone number
             digits = _re.sub(r'[^0-9+]', '', target)
             if len(digits) >= 7:
                 action_data = {"action": "phone_make_call", "number": digits}
             else:
                 action_data = {"action": "phone_make_call", "contactName": target}
-
-        elif any(w in text_lower for w in ["end call", "hang up", "cut the call", "call end",
-                                            "call kat", "call kaat", "disconnect call"]):
-            action_data = {"action": "phone_end_call"}
 
         # ── SMS ───────────────────────────────────────────────────────────
         elif any(w in text_lower for w in ["send sms", "send text", "send a text", "sms bhejo",
@@ -6704,6 +6777,8 @@ JSON:"""
         # ── Full Phone Automation (new) ────────────────────────────────
         "phone_make_call": lambda d: _phone_action("make_call", d, session),
         "phone_end_call": lambda d: _phone_action("end_call", d, session),
+        "phone_answer_call": lambda d: _phone_action("answer_call", d, session),
+        "phone_reject_call": lambda d: _phone_action("reject_call", d, session),
         "phone_send_sms": lambda d: _phone_action("send_sms", d, session),
         "phone_volume": lambda d: _phone_action("volume", d, session),
         "phone_media": lambda d: _phone_action("media", d, session),
@@ -6806,7 +6881,8 @@ JSON:"""
     # ── Format result via LLM (Fallback for non-templated actions) ────────
     if result:
         try:
-            from ollama_client import ollama_chat  # type: ignore[import]
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
 
             format_prompt = f"""You are MJ, a voice assistant. 
 The user asked: "{user_text}"
@@ -6814,7 +6890,7 @@ The action result is: {json.dumps(result)}
 LANGUAGE RULE: If the user spoke English, reply in PURE English only. If Hindi, reply in PURE Hindi (Devanagari) only. NEVER mix languages.
 Give a natural, concise spoken response (1 sentence). Sound human, not robotic."""
 
-            text = ollama_chat(prompt=format_prompt, max_tokens=60, temperature=0.5)
+            text = orch.chat(messages=[{"role": "user", "content": format_prompt}], max_tokens=60, temperature=0.5)
             if text:
                 tokens = [text]
                 if meta:

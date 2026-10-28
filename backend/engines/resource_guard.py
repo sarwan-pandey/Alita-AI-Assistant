@@ -50,13 +50,13 @@ class ResourceGuard:
         if vm is None:
             return True
 
-        if vm.percent >= 92.0:
-            log.warning("RAM dangerously high: %.1f%% used", vm.percent)
+        available_mb = vm.available / (1024 * 1024)
+        if vm.percent >= 96.5 and available_mb < 400.0:
+            log.warning("RAM dangerously high: %.1f%% used (%.1f MB available)", vm.percent, available_mb)
             return False
 
-        available_mb = vm.available / (1024 * 1024)
-        # Require 20% safety margin above estimated memory
-        required_mb = estimated_mb * 1.2
+        # Require reasonable safety margin above estimated memory (minimum 250MB)
+        required_mb = min(estimated_mb * 1.1, 400.0)
         if available_mb < required_mb:
             log.warning(
                 "Insufficient RAM headroom for %d MB: only %.1f MB available (need %.1f MB)",

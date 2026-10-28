@@ -637,19 +637,20 @@ class YouTubeShortsWorkflow(BaseWorkflow):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _generate_with_llm(prompt: str) -> str:
-    """Generate text using local Ollama (Qwen3-8B)."""
+    """Generate text using Provider Orchestrator (P1)."""
     try:
         import asyncio
-        from ollama_client import ollama_chat  # type: ignore[import]
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
 
-        # ollama_chat is synchronous — run in thread pool to stay async
+        messages = [{"role": "user", "content": prompt}]
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: ollama_chat(prompt=prompt, max_tokens=200, temperature=0.7),
+            lambda: orch.chat(messages=messages, max_tokens=200, temperature=0.7),
         )
         return result or ""
     except Exception as e:
-        logger.warning("[YouTubeShortsWorkflow] Ollama LLM failed: %s", e)
+        logger.warning("[YouTubeShortsWorkflow] Provider LLM failed: %s", e)
         return ""
 

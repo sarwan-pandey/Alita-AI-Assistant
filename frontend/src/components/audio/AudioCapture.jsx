@@ -209,6 +209,8 @@ export function AudioCapture({
     const wasProcessing = processingRef.current;
     ttsPlayingRef.current = false;
     processingRef.current = false; // allow new speech immediately
+    ttsEndTimeRef.current = 0; // Clear echo gate so intentional barge-in speech is immediately accepted
+    ttsCooldownRef.current = 0;
     setMicState("active");
 
     if (!wasPlaying && !wasProcessing) return;
@@ -276,6 +278,17 @@ export function AudioCapture({
       clearTimeout(processingTimeoutRef.current);
       ttsPlayingRef.current = false;
       processingRef.current = false;
+      ttsEndTimeRef.current = Date.now();
+      ttsCooldownRef.current = Date.now();
+      setMicState("active");
+    };
+
+    const ttsEndHandler = () => {
+      clearTimeout(processingTimeoutRef.current);
+      ttsPlayingRef.current = false;
+      processingRef.current = false;
+      ttsEndTimeRef.current = Date.now();
+      ttsCooldownRef.current = Date.now();
       setMicState("active");
     };
 
@@ -283,12 +296,16 @@ export function AudioCapture({
       const msg = e.detail;
       if (msg.is_final && !msg.audio_b64) {
         // Authoritative completion: backend finished synthesis for this turn.
+        // Forward the final marker to audioStreamPlayer so it knows no more chunks are pending.
+        audioStreamPlayer.enqueueChunk(msg);
         // If audio is already playing or queued, audioStreamPlayer.options.onEnd will clear processingRef when done.
         // If NO audio was generated (silent response or empty text), clear processing state immediately.
         if (!audioStreamPlayer.isPlaying && audioStreamPlayer.queue.length === 0) {
           clearTimeout(processingTimeoutRef.current);
           processingRef.current = false;
           ttsPlayingRef.current = false;
+          ttsEndTimeRef.current = 0;
+          ttsCooldownRef.current = 0;
           setMicState("active");
         }
         return;
@@ -300,6 +317,8 @@ export function AudioCapture({
       clearTimeout(processingTimeoutRef.current);
       processingRef.current = false;
       ttsPlayingRef.current = false;
+      ttsEndTimeRef.current = 0;
+      ttsCooldownRef.current = 0;
       setMicState("active");
       audioStreamPlayer.interrupt();
     };
@@ -312,12 +331,16 @@ export function AudioCapture({
         clearTimeout(processingTimeoutRef.current);
         processingRef.current = false;
         ttsPlayingRef.current = false;
+        ttsEndTimeRef.current = 0;
+        ttsCooldownRef.current = 0;
         setMicState("active");
       }
     };
 
     window.addEventListener("MJ:tts_chunk", handler);
     window.addEventListener("Alita:tts_chunk", handler);
+    window.addEventListener("MJ:tts_ended", ttsEndHandler);
+    window.addEventListener("Alita:tts_ended", ttsEndHandler);
     window.addEventListener("MJ:turn_error", errorHandler);
     window.addEventListener("Alita:turn_error", errorHandler);
     window.addEventListener("MJ:turn_discarded", discardHandler);
@@ -325,6 +348,8 @@ export function AudioCapture({
     return () => {
       window.removeEventListener("MJ:tts_chunk", handler);
       window.removeEventListener("Alita:tts_chunk", handler);
+      window.removeEventListener("MJ:tts_ended", ttsEndHandler);
+      window.removeEventListener("Alita:tts_ended", ttsEndHandler);
       window.removeEventListener("MJ:turn_error", errorHandler);
       window.removeEventListener("Alita:turn_error", errorHandler);
       window.removeEventListener("MJ:turn_discarded", discardHandler);
@@ -379,11 +404,14 @@ export function AudioCapture({
   const isEcho = useCallback((transcript) => {
     if (!lastAlitaTextRef.current) return false;
 
-    // Only check echo while TTS is actively playing or within 1.5s of TTS ending
-    // (covers physical room reverb without blocking real user speech 5s later)
+    // Only check echo while TTS is actively playing or within 5s of TTS ending
+    // Extended from 1.5s to 5s: Web Speech API results arrive asynchronously with
+    // network round-trip delays to Google's servers. After TTS ends, delayed final
+    // results from MJ's own voice can arrive 2-5s later. This only blocks text that
+    // MATCHES MJ's speech — genuine user speech with different content passes through.
     const isCurrentlyPlaying = ttsPlayingRef.current;
     const msSinceTTS = Date.now() - (ttsEndTimeRef.current || 0);
-    if (!isCurrentlyPlaying && msSinceTTS > 1500) return false;
+    if (!isCurrentlyPlaying && msSinceTTS > 5000) return false;
 
     const alitaText = lastAlitaTextRef.current.toLowerCase();
     const userText = transcript.toLowerCase();
@@ -547,14 +575,24 @@ export function AudioCapture({
           candidate.split(/\s+/).length >= 2 ||
           /^(stop|cancel|ruko|bas|wait)$/i.test(candidate);
 
-        if (speechProb > bargeInThreshold && !looksLikeEcho && isExplicitCommand) {
-          console.log(`[STT] User interrupted during processing: "${candidate.slice(0, 40)}"`);
+        // Web Speech FINAL transcripts are server-validated by Google's speech engine.
+        // They arrive AFTER the user stops speaking, when VAD reports near-zero speechProb
+        // (the VAD is processing silence frames by then). Requiring real-time VAD confirmation
+        // for final transcripts creates a timing mismatch that blocks ALL legitimate speech.
+        // Only require speechProb gating for INTERIM transcripts (less reliable, need VAD backup).
+        const hasFinalTranscript = !!finalTranscript.trim();
+        const passesBargeIn = hasFinalTranscript
+          ? (!looksLikeEcho && isExplicitCommand)                          // Final: trust Web Speech, check content only
+          : (speechProb > bargeInThreshold && !looksLikeEcho && isExplicitCommand);  // Interim: require VAD confirmation
+
+        if (passesBargeIn) {
+          console.log(`[STT] User interrupted during processing (final=${hasFinalTranscript}): "${candidate.slice(0, 40)}"`);
           stopTTS();
           processingRef.current = false;
         } else {
           // Trailing recognition fragment or ambient noise while waiting for response — ignore!
           if (finalTranscript.trim() || interimTranscript.trim()) {
-            console.log(`[STT] Trailing STT discarded while processing: "${candidate.slice(0, 40)}" (speechProb=${speechProb.toFixed(3)})`);
+            console.log(`[STT] Trailing STT discarded while processing: "${candidate.slice(0, 40)}" (speechProb=${speechProb.toFixed(3)}, isFinal=${hasFinalTranscript})`);
           }
           return;
         }

@@ -240,6 +240,23 @@ class MainActivity : AppCompatActivity() {
                 btnIgnoreBattery.text = "Allow"
             }
         }
+
+        // 4. Runtime Telephony & Contacts Permissions
+        val requiredPerms = mutableListOf(
+            android.Manifest.permission.READ_PHONE_STATE,
+            android.Manifest.permission.READ_CALL_LOG,
+            android.Manifest.permission.READ_CONTACTS,
+            android.Manifest.permission.CALL_PHONE
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            requiredPerms.add(android.Manifest.permission.ANSWER_PHONE_CALLS)
+        }
+        val missingPerms = requiredPerms.filter {
+            ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPerms.isNotEmpty()) {
+            requestPermissions(missingPerms.toTypedArray(), 101)
+        }
     }
 
     private fun updateStatusUi(status: String) {

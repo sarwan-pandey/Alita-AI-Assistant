@@ -31,15 +31,15 @@ def get_voice_context():
 
 @voice_router.get("/voices")
 async def list_voices():
-    """List available voice models (exclusively ChatTTS and F5-TTS)."""
+    """List available voice models."""
     ctx = get_voice_context()
     available_voices = ctx["AVAILABLE_VOICES"]
     engines = ctx["engines"]
 
     voices = []
     for vid, info in available_voices.items():
-        engine_type = info.get("engine", "chattts")
-        is_available = True  # Both ChatTTS and F5-TTS are primary supported local engines
+        engine_type = info.get("engine", "chatterbox_turbo")
+        is_available = True
 
         voices.append({
             "id": vid,
@@ -57,8 +57,8 @@ async def list_voices():
 
 @voice_router.post("/voices/upload")
 async def upload_voice(request: Request):
-    """Upload a voice sample WAV for voice cloning (deprecated)."""
-    raise HTTPException(status_code=501, detail="Voice cloning removed. Using Chatterbox Turbo engine.")
+    """Upload a voice sample WAV for voice cloning (disabled)."""
+    raise HTTPException(status_code=501, detail="Custom voice cloning is unavailable.")
 
 
 @voice_router.delete("/voices/{voice_id}")
@@ -68,7 +68,7 @@ async def delete_voice(voice_id: str, request: Request):
     user = await require_auth(request)
     user_id = user["user_id"]
 
-    if not (voice_id.startswith("f5_custom_") or voice_id.startswith("xtts_custom_")):
+    if not (voice_id.startswith("custom_") or voice_id.startswith("xtts_custom_")):
         raise HTTPException(status_code=400, detail="Can only delete custom voices.")
 
     ctx = get_voice_context()

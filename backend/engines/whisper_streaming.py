@@ -21,10 +21,11 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from collections import deque
-from typing import Optional
+from collections import Counter, deque
+from typing import Optional, Tuple
 
 import numpy as np  # type: ignore[import]
 
@@ -48,6 +49,83 @@ SPEECH_MIN_DURATION_MS = 250          # ignore speech shorter than this
 SILENCE_ENDPOINT_MS = 600             # silence duration to trigger endpoint
 PRE_SPEECH_PADDING_MS = 300           # include audio before speech onset
 SILERO_SPEECH_THRESHOLD = 0.5         # Silero probability: > this = speech
+
+
+def validate_whisper_transcript(text: str) -> Tuple[bool, str]:
+    """
+    Deterministic validation layer for Whisper STT transcripts before acceptance.
+    Rejects hallucinations, noise artifacts, and degenerate repetition loops
+    while preserving short legitimate commands ('Stop', 'Yes', 'No', 'Open Chrome').
+    """
+    if not text:
+        return False, "empty_transcript"
+
+    clean = text.strip()
+    if len(clean) == 0:
+        return False, "empty_transcript"
+
+    # Must contain at least one alphanumeric character
+    if not re.search(r"\w", clean):
+        return False, "no_alphanumeric_content"
+
+    # Single character: only accept single digits like '1', '2'
+    if len(clean) == 1 and not clean.isdigit():
+        return False, "single_non_digit_character"
+
+    # Acoustic tag artifacts: e.g. [BLANK_AUDIO], (music), *sigh*
+    if (clean.startswith("[") and clean.endswith("]")) or \
+       (clean.startswith("(") and clean.endswith(")")) or \
+       (clean.startswith("*") and clean.endswith("*")):
+        return False, "audio_artifact_tag"
+
+    lower = clean.lower()
+
+    # Known Whisper silence / ambient noise hallucinations from YouTube training data
+    hallucination_patterns = [
+        r"^thank you for watching",
+        r"^thanks for watching",
+        r"^please subscribe",
+        r"^subscribe to my channel",
+        r"^subtitles by",
+        r"^translated by",
+        r"^closed captions by",
+    ]
+    for pat in hallucination_patterns:
+        if re.search(pat, lower):
+            return False, "whisper_hallucination_phrase"
+
+    # Consecutive repeated word: word repeated 4+ times (e.g. "room room room room")
+    if re.search(r"\b(\w+)(?:\s+\1){3,}\b", lower):
+        return False, "consecutive_word_loop"
+
+    words = re.findall(r"\b\w+\b", lower)
+    if not words:
+        return False, "no_words_found"
+
+    # Repetitive n-grams (2-gram, 3-gram, 4-gram) appearing >= 3 times
+    if len(words) >= 6:
+        for n in (2, 3, 4):
+            ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
+            counts = Counter(ngrams)
+            for ng, cnt in counts.items():
+                if cnt >= 3:
+                    return False, f"repetitive_{n}gram_loop: '{ng}' x{cnt}"
+
+    # Sentence / clause repetition (split by punctuation)
+    clauses = [c.strip() for c in re.split(r"[.?!,]+", lower) if len(c.strip()) >= 3]
+    if len(clauses) >= 3:
+        clause_counts = Counter(clauses)
+        for cl, cnt in clause_counts.items():
+            if cnt >= 3:
+                return False, f"repetitive_clause_loop: '{cl}' x{cnt}"
+
+    # Vocabulary diversity: for utterances with >= 8 words, unique ratio must be >= 0.35
+    if len(words) >= 8:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.35:
+            return False, f"low_vocabulary_diversity: {unique_ratio:.2f}"
+
+    return True, "valid"
 
 
 class WhisperStreamProcessor:
@@ -233,8 +311,13 @@ class WhisperStreamProcessor:
         try:
             transcript = self._transcribe(audio)
             if transcript and transcript.strip():
-                self._pending_transcript = transcript.strip()
-                log.info("[WhisperStream] Transcribed: '%s'", transcript[:60])  # type: ignore[index]
+                clean_candidate = transcript.strip()
+                is_valid, reason = validate_whisper_transcript(clean_candidate)
+                if is_valid:
+                    self._pending_transcript = clean_candidate
+                    log.info("[WhisperStream] Transcribed: '%s'", clean_candidate[:60])  # type: ignore[index]
+                else:
+                    log.warning("[WhisperStream] Rejected low-quality transcript '%s' (reason: %s)", clean_candidate[:60], reason)
             else:
                 log.debug("[WhisperStream] Empty transcription result")
         except Exception as exc:
@@ -259,7 +342,26 @@ class WhisperStreamProcessor:
                     speech_pad_ms=50,
                 ),
             )
-            text = " ".join(seg.text.strip() for seg in segments).strip()
+            valid_segment_texts = []
+            for seg in segments:
+                no_speech = getattr(seg, 'no_speech_prob', 0.0) or 0.0
+                avg_logprob = getattr(seg, 'avg_logprob', 0.0) or 0.0
+                compression_ratio = getattr(seg, 'compression_ratio', 1.0) or 1.0
+                # Filter out obvious no-speech hallucinated segments
+                if no_speech > 0.65 and avg_logprob < -1.0:
+                    log.debug("[WhisperStream] Dropping no-speech segment: prob=%.2f, logprob=%.2f, text='%s'",
+                              no_speech, avg_logprob, seg.text.strip()[:40])
+                    continue
+                # Filter out degenerate compression loops
+                if compression_ratio > 2.4:
+                    log.debug("[WhisperStream] Dropping high-compression loop segment: ratio=%.2f, text='%s'",
+                              compression_ratio, seg.text.strip()[:40])
+                    continue
+                seg_text = seg.text.strip()
+                if seg_text:
+                    valid_segment_texts.append(seg_text)
+
+            text = " ".join(valid_segment_texts).strip()
             lang = getattr(info, 'language', 'en') or 'en'
             log.debug("[WhisperStream] STT: lang=%s text='%s'", lang, text)
             return text

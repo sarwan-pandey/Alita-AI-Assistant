@@ -56,7 +56,7 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
     const [selectedLang, setSelectedLang] = useState("en");
     const [selectedVoice, setSelectedVoice] = useState(() => {
         const saved = localStorage.getItem("alita_voice_id");
-        if (!saved || saved === "chatterbox_mj" || saved === "f5_mj_clone" || saved === "chattts_mj") {
+        if (!saved || saved !== "chatterbox_turbo_mj") {
             localStorage.setItem("alita_voice_id", "chatterbox_turbo_mj");
             return "chatterbox_turbo_mj";
         }
@@ -337,9 +337,9 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                                                         💖 ChatTTS
                                                     </span>
                                                 )}
-                                                {voice.engine === "f5" && (
-                                                    <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(56, 189, 248, 0.2)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.3)" }}>
-                                                        🌊 F5-TTS
+                                                {voice.engine === "chatterbox_turbo" && (
+                                                    <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(168, 85, 247, 0.2)", color: "#c084fc", border: "1px solid rgba(168, 85, 247, 0.3)" }}>
+                                                        ✨ Chatterbox Turbo
                                                     </span>
                                                 )}
                                                 {voice.engine === "chatterbox" && (
@@ -437,7 +437,7 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                         </div>
                     </div>
 
-                    {/* F5-TTS Voice Studio trigger */}
+                    {/* Voice Cloning Status */}
                     <button
                         className="vc-clone-trigger hoverable"
                         onClick={() => { setShowCloner(true); setIsOpen(false); }}
@@ -445,27 +445,33 @@ export function VoiceModelChanger({ sendVoiceChange, onPremiumRequired, external
                             display: "flex",
                             alignItems: "center",
                             gap: "10px",
-                            background: "linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(168, 85, 247, 0.15))",
-                            border: "1px solid rgba(56, 189, 248, 0.35)",
+                            background: "rgba(255, 255, 255, 0.04)",
+                            border: "1px dashed rgba(255, 255, 255, 0.2)",
                             borderRadius: "10px",
                             padding: "10px 14px",
                             marginTop: "8px",
                             cursor: "pointer",
                             width: "100%",
                             textAlign: "left",
+                            opacity: 0.85,
                             transition: "all 0.2s ease",
                         }}
                     >
-                        <span style={{ fontSize: "1.3rem" }}>🌊</span>
+                        <span style={{ fontSize: "1.2rem" }}>🎙️</span>
                         <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "#38bdf8" }}>
-                                F5-TTS Voice Studio
+                            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span style={{ fontWeight: 600, fontSize: "0.85rem", color: "rgba(255,255,255,0.85)" }}>
+                                    Custom Voice Cloning
+                                </span>
+                                <span style={{ fontSize: "0.62rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(239, 68, 68, 0.15)", color: "#f87171", border: "1px solid rgba(239, 68, 68, 0.3)" }}>
+                                    Unavailable
+                                </span>
                             </div>
-                            <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.65)" }}>
-                                Zero-shot clone any voice from 3‑15s audio
+                            <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.5)" }}>
+                                Custom cloning unavailable — Chatterbox active
                             </div>
                         </div>
-                        <span style={{ color: "#38bdf8", fontSize: "0.95rem", fontWeight: "bold" }}>→</span>
+                        <span style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.85rem" }}>ℹ</span>
                     </button>
                 </div>
             )}

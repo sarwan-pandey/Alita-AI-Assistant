@@ -57,19 +57,17 @@ async def main():
 
     turbo_ok = getattr(engines, "chatterbox_turbo_engine", None) is not None and engines.chatterbox_turbo_engine.available
     chattts_ok = getattr(engines, "chattts_engine", None) is not None and engines.chattts_engine.available
-    f5_ok = getattr(engines, "f5_engine", None) is not None and engines.f5_engine.available
 
     default_en = DEFAULT_VOICE.get("en", "chatterbox_turbo_mj")
     default_hi = DEFAULT_VOICE.get("hi", "chatterbox_turbo_mj")
 
     print(f"   • Chatterbox-Turbo:         {'ONLINE (Ready)' if turbo_ok else 'OFFLINE'}")
     print(f"   • ChatTTS Conversational:   {'ONLINE (Ready)' if chattts_ok else 'OFFLINE'}")
-    print(f"   • F5-TTS Diffusion Clone:   {'ONLINE (Ready)' if f5_ok else 'OFFLINE'}")
     print(f"   • Default English Voice:    '{default_en}'")
     print(f"   • Default Hindi Voice:      '{default_hi}'")
 
     # If engines are not loaded locally (e.g. dev/CI without model weights), test pipeline with mock
-    if not (turbo_ok or chattts_ok or f5_ok):
+    if not (turbo_ok or chattts_ok):
         print("   • Notice: Local heavy TTS models offline — testing pipeline routing with Mock engine")
         class MockTTS:
             available = True

@@ -30,7 +30,10 @@ import android.provider.AlarmClock
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.telecom.TelecomManager
+import android.telephony.PhoneStateListener
 import android.telephony.SmsManager
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.gson.Gson
@@ -40,6 +43,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
@@ -104,6 +108,35 @@ class AlitaPhoneBridgeService : Service() {
         }
     }
 
+    // ── Telephony Callbacks & Call State Machine ──────────────────────────────
+    private var telephonyManager: TelephonyManager? = null
+    private var telephonyCallback: Any? = null // TelephonyCallback on API 31+
+    private var phoneStateListener: PhoneStateListener? = null
+    private var lastCallState: Int = TelephonyManager.CALL_STATE_IDLE
+    private var currentCallId: String? = null
+    private var cachedIncomingNumber: String? = null
+    private var pendingRingingRunnable: Runnable? = null
+
+    private val telephonyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null || intent.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
+            val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
+            val incomingNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
+            Log.d(TAG, "TelephonyReceiver: stateStr=$stateStr, incomingNumber=${if (incomingNumber != null) "***" else "null"}")
+
+            if (stateStr == TelephonyManager.EXTRA_STATE_RINGING) {
+                if (!incomingNumber.isNullOrBlank()) {
+                    cachedIncomingNumber = incomingNumber
+                }
+                handleCallState(TelephonyManager.CALL_STATE_RINGING, incomingNumber)
+            } else if (stateStr == TelephonyManager.EXTRA_STATE_OFFHOOK) {
+                handleCallState(TelephonyManager.CALL_STATE_OFFHOOK, null)
+            } else if (stateStr == TelephonyManager.EXTRA_STATE_IDLE) {
+                handleCallState(TelephonyManager.CALL_STATE_IDLE, null)
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -124,6 +157,8 @@ class AlitaPhoneBridgeService : Service() {
         } else {
             registerReceiver(screenStateReceiver, screenFilter)
         }
+
+        setupTelephonyListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -160,6 +195,7 @@ class AlitaPhoneBridgeService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "screenStateReceiver unregister notice: ${e.message}")
         }
+        teardownTelephonyListener()
         if (instance == this) {
             instance = null
         }
@@ -489,6 +525,38 @@ class AlitaPhoneBridgeService : Service() {
                         }
                     } catch (e: SecurityException) {
                         sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to "ANSWER_PHONE_CALLS permission not granted"))
+                    }
+                }
+
+                "answer_call" -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val telecom = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                            telecom?.acceptRingingCall()
+                            sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to true))
+                        } else {
+                            sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to "Requires Android 8+"))
+                        }
+                    } catch (e: SecurityException) {
+                        sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to "ANSWER_PHONE_CALLS permission not granted"))
+                    } catch (e: Exception) {
+                        sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to (e.message ?: "Failed to answer call")))
+                    }
+                }
+
+                "reject_call" -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            val telecom = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                            val ended = telecom?.endCall() ?: false
+                            sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to ended))
+                        } else {
+                            sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to "Requires Android 9+"))
+                        }
+                    } catch (e: SecurityException) {
+                        sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to "ANSWER_PHONE_CALLS permission not granted"))
+                    } catch (e: Exception) {
+                        sendReply(mapOf("type" to "command_result", "id" to commandId, "success" to false, "error" to (e.message ?: "Failed to reject call")))
                     }
                 }
 
@@ -1279,6 +1347,208 @@ class AlitaPhoneBridgeService : Service() {
             Log.e(TAG, "Error resolving contact '$contactName': ${e.message}")
         }
         return null
+    }
+
+    data class CallerInfo(
+        val callerName: String,
+        val isKnownContact: Boolean,
+        val isPrivate: Boolean
+    )
+
+    /**
+     * Reverse lookup caller name from phone number using ContactsContract.PhoneLookup.
+     * Returns CallerInfo with callerName, isKnownContact, isPrivate.
+     */
+    private fun resolveCallerInfo(number: String?): CallerInfo {
+        if (number.isNullOrBlank() || number == "-1" || number == "-2" || number.equals("unknown", ignoreCase = true)) {
+            return CallerInfo(callerName = "Private Number", isKnownContact = false, isPrivate = true)
+        }
+
+        try {
+            val uri = Uri.withAppendedPath(
+                ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                Uri.encode(number)
+            )
+            val projection = arrayOf(
+                ContactsContract.PhoneLookup.DISPLAY_NAME
+            )
+            val cursor = contentResolver.query(uri, projection, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(ContactsContract.PhoneLookup.DISPLAY_NAME)
+                    if (nameIndex >= 0) {
+                        val name = it.getString(nameIndex)
+                        if (!name.isNullOrBlank()) {
+                            Log.i(TAG, "Telephony: Resolved caller '$number' → $name")
+                            return CallerInfo(callerName = name, isKnownContact = true, isPrivate = false)
+                        }
+                    }
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "READ_CONTACTS permission not granted for PhoneLookup: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error looking up caller name for '$number': ${e.message}")
+        }
+
+        return CallerInfo(callerName = number, isKnownContact = false, isPrivate = false)
+    }
+
+    /**
+     * Centralized telephony state transition coordinator.
+     * Maps CALL_STATE_RINGING, CALL_STATE_OFFHOOK, and CALL_STATE_IDLE to structured WSS events.
+     */
+    @Synchronized
+    private fun handleCallState(state: Int, incomingNumber: String?) {
+        if (!incomingNumber.isNullOrBlank() && cachedIncomingNumber == null) {
+            cachedIncomingNumber = incomingNumber
+        }
+
+        if (state == lastCallState) {
+            return
+        }
+
+        val prevState = lastCallState
+        lastCallState = state
+
+        when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> {
+                pendingRingingRunnable?.let { mainHandler.removeCallbacks(it) }
+
+                val callId = "call_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+                currentCallId = callId
+
+                val runnable = Runnable {
+                    val num = cachedIncomingNumber
+                    val info = resolveCallerInfo(num)
+                    val payload = mapOf(
+                        "type" to "incoming_call",
+                        "event_id" to callId,
+                        "number" to (num ?: "unknown"),
+                        "caller" to info.callerName,
+                        "is_known_contact" to info.isKnownContact,
+                        "is_private" to info.isPrivate,
+                        "state" to "ringing",
+                        "timestamp" to System.currentTimeMillis()
+                    )
+                    Log.i(TAG, "Telephony: Incoming call from '${info.callerName}' (known=${info.isKnownContact}, id=$callId)")
+                    sendReply(payload)
+                }
+                pendingRingingRunnable = runnable
+
+                if (!incomingNumber.isNullOrBlank() || cachedIncomingNumber != null) {
+                    mainHandler.post(runnable)
+                } else {
+                    mainHandler.postDelayed(runnable, 200)
+                }
+            }
+
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                pendingRingingRunnable?.let { mainHandler.removeCallbacks(it) }
+                pendingRingingRunnable = null
+
+                if (prevState == TelephonyManager.CALL_STATE_RINGING) {
+                    val callId = currentCallId ?: "call_${System.currentTimeMillis()}"
+                    val payload = mapOf(
+                        "type" to "call_state_changed",
+                        "event_id" to callId,
+                        "state" to "active",
+                        "timestamp" to System.currentTimeMillis()
+                    )
+                    Log.i(TAG, "Telephony: Call active (id=$callId)")
+                    sendReply(payload)
+                }
+            }
+
+            TelephonyManager.CALL_STATE_IDLE -> {
+                pendingRingingRunnable?.let { mainHandler.removeCallbacks(it) }
+                pendingRingingRunnable = null
+
+                if (prevState == TelephonyManager.CALL_STATE_RINGING || prevState == TelephonyManager.CALL_STATE_OFFHOOK) {
+                    val callId = currentCallId ?: "call_${System.currentTimeMillis()}"
+                    val payload = mapOf(
+                        "type" to "call_state_changed",
+                        "event_id" to callId,
+                        "state" to "ended",
+                        "timestamp" to System.currentTimeMillis()
+                    )
+                    Log.i(TAG, "Telephony: Call ended (id=$callId)")
+                    sendReply(payload)
+                }
+                currentCallId = null
+                cachedIncomingNumber = null
+            }
+        }
+    }
+
+    private fun setupTelephonyListener() {
+        try {
+            telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            if (telephonyManager == null) {
+                Log.w(TAG, "TelephonyManager not available")
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        handleCallState(state, null)
+                    }
+                }
+                telephonyCallback = callback
+                telephonyManager?.registerTelephonyCallback(mainExecutor, callback)
+                Log.i(TAG, "Registered TelephonyCallback.CallStateListener (API 31+)")
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handleCallState(state, phoneNumber)
+                    }
+                }
+                phoneStateListener = listener
+                @Suppress("DEPRECATION")
+                telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+                Log.i(TAG, "Registered PhoneStateListener (legacy)")
+            }
+
+            val telephonyFilter = IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(telephonyReceiver, telephonyFilter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(telephonyReceiver, telephonyFilter)
+            }
+            Log.i(TAG, "Registered ACTION_PHONE_STATE broadcast receiver")
+        } catch (e: SecurityException) {
+            Log.w(TAG, "READ_PHONE_STATE or READ_CALL_LOG not granted yet for telephony listener: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up telephony listener: ${e.message}")
+        }
+    }
+
+    private fun teardownTelephonyListener() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = telephonyCallback as? TelephonyCallback
+                if (callback != null) {
+                    telephonyManager?.unregisterTelephonyCallback(callback)
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = phoneStateListener
+                if (listener != null) {
+                    @Suppress("DEPRECATION")
+                    telephonyManager?.listen(listener, PhoneStateListener.LISTEN_NONE)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error unregistering telephony callback: ${e.message}")
+        }
+        try {
+            unregisterReceiver(telephonyReceiver)
+        } catch (e: Exception) {
+            // receiver may not have been registered
+        }
     }
 
     // ==========================================

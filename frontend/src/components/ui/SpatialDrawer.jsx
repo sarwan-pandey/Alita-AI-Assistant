@@ -36,7 +36,7 @@ export const SpatialDrawer = memo(function SpatialDrawer({
   const [voices, setVoices] = useState(DEFAULT_FALLBACK_VOICES);
   const [selectedVoice, setSelectedVoice] = useState(() => {
     const saved = localStorage.getItem("mj_voice_id") || localStorage.getItem("alita_voice_id") || localStorage.getItem("alita_selected_voice");
-    if (!saved || saved === "chatterbox_mj" || saved === "f5_mj_clone" || saved === "chattts_mj") {
+    if (!saved || saved !== "chatterbox_turbo_mj") {
       localStorage.setItem("mj_voice_id", "chatterbox_turbo_mj");
       localStorage.setItem("alita_voice_id", "chatterbox_turbo_mj");
       localStorage.setItem("alita_selected_voice", "chatterbox_turbo_mj");

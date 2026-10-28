@@ -124,17 +124,11 @@ def _try_ollama(user_text: str, session, settings, system_prompt: str,
                 history: list, max_tokens: int,
                 cancel_event: threading.Event | None = None) -> str | None:
     """
-    Try local Ollama model (Qwen3 4B Q4) — zero API cost, no rate limits.
-    Uses the centralized ollama_client module.
+    Handle query via Provider Orchestrator (P1).
+    Legacy direct import of ollama_client is replaced with provider contract.
     """
     if cancel_event and cancel_event.is_set():
-        log.info("[%s] Ollama skipped — cancel_event set (barge-in)", session.session_id)
-        return None
-
-    try:
-        from ollama_client import ollama_chat_messages, get_model_name  # type: ignore[import]
-    except ImportError:
-        log.error("[%s] ollama_client module not found!", session.session_id)
+        log.info("[%s] LLM skipped — cancel_event set (barge-in)", session.session_id)
         return None
 
     # Inject cross-session memory into system prompt
@@ -151,18 +145,20 @@ def _try_ollama(user_text: str, session, settings, system_prompt: str,
         )
 
     try:
-        text = ollama_chat_messages(
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
+        text = orch.chat(
             messages=messages,
-            model=getattr(settings, "ollama_model", "") or get_model_name(),
             max_tokens=max_tokens,
             temperature=getattr(settings, "llm_temperature", 0.7),
+            turn_id=session.session_id,
         )
         if text:
-            log.info("[%s] Ollama response: %d chars (model=%s)",
-                     session.session_id, len(text), get_model_name())
+            log.info("[%s] LLM response: %d chars (model=%s)",
+                     session.session_id, len(text), orch.get_active_model_name("llm"))
             return text
     except Exception as e:
-        log.warning("[%s] Ollama failed: %s", session.session_id, e)
+        log.warning("[%s] LLM chat failed: %s", session.session_id, e)
 
     return None
 
@@ -215,9 +211,8 @@ def _try_ollama_stream(user_text: str, session, settings, system_prompt: str,
                        history: list, max_tokens: int, token_queue: queue.Queue,
                        cancel_event: threading.Event | None = None) -> bool:
     """
-    Stream Ollama response token-by-token into token_queue.
-    Uses the native Ollama API (/api/chat) to properly handle Qwen3's
-    thinking mode — only real content tokens are forwarded.
+    Stream LLM response token-by-token into token_queue via Provider Orchestrator (P1).
+    Legacy direct import of ollama_client is replaced with provider contract streaming.
     Returns True if successful (tokens were streamed), False otherwise.
     Puts None sentinel when done.
     """
@@ -225,99 +220,62 @@ def _try_ollama_stream(user_text: str, session, settings, system_prompt: str,
         return False
 
     try:
-        import json as _json
-        import httpx
-        from ollama_client import (  # type: ignore[import]
-            OLLAMA_NATIVE_URL, get_model_name,
-            OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_REPEAT_PENALTY,
-            OLLAMA_NUM_GPU,
-        )
-    except ImportError:
-        log.error("[%s] Required modules not found!", session.session_id)
-        return False
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
 
-    try:
         # Inject cross-session memory into system prompt
         system_prompt = _inject_memory(system_prompt, user_text, session.user_id)
-
         messages = _build_messages(system_prompt, history, user_text)
-        model = getattr(settings, "ollama_model", "") or get_model_name()
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {
-                "num_predict": max(max_tokens, 768),
-                "temperature": getattr(settings, "llm_temperature", 0.7),
-                "num_ctx": OLLAMA_NUM_CTX,
-                "repeat_penalty": OLLAMA_REPEAT_PENALTY,
-                "num_gpu": OLLAMA_NUM_GPU,
-            },
-        }
+        stream = orch.chat_stream(
+            messages=messages,
+            max_tokens=max(max_tokens, 768),
+            temperature=getattr(settings, "llm_temperature", 0.7),
+            turn_id=session.session_id,
+        )
+        if not stream:
+            return False
 
         token_count = 0
         in_think_block = False
-        with httpx.Client(timeout=60.0) as http:
-            with http.stream("POST", f"{OLLAMA_NATIVE_URL}/api/chat", json=payload) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if cancel_event and cancel_event.is_set():
-                        log.info("[%s] Ollama stream aborted (barge-in) after %d tokens",
-                                 session.session_id, token_count)
-                        token_queue.put(None)
-                        return True  # partial stream is fine
+        for chunk in stream:
+            if cancel_event and cancel_event.is_set():
+                log.info("[%s] Stream aborted (barge-in) after %d tokens",
+                         session.session_id, token_count)
+                token_queue.put(None)
+                return True
 
-                    if not line.strip():
-                        continue
+            content = chunk or ""
+            if not content:
+                continue
 
-                    try:
-                        data = _json.loads(line)
-                    except _json.JSONDecodeError:
-                        continue
+            # Strict suppression of <think> tags and thinking field: data.get("message", {}).get("thinking")
+            if "<think>" in content:
+                in_think_block = True
+                if "</think>" in content:
+                    content = content.split("</think>", 1)[1]
+                    in_think_block = False
+                else:
+                    content = ""
+            elif in_think_block:
+                if "</think>" in content:
+                    content = content.split("</think>", 1)[1]
+                    in_think_block = False
+                else:
+                    content = ""
 
-                    # STRICT SUPPRESSION 1: Drop Ollama's separate thinking field completely.
-                    # Never push reasoning thought tokens to token_queue or TTS.
-                    if data.get("message", {}).get("thinking"):
-                        continue
-
-                    # STRICT SUPPRESSION 2: Drop and filter any inline <think> tags in content
-                    content = data.get("message", {}).get("content", "")
-                    if not content:
-                        if data.get("done", False):
-                            break
-                        continue
-
-                    if "<think>" in content:
-                        in_think_block = True
-                        if "</think>" in content:
-                            content = content.split("</think>", 1)[1]
-                            in_think_block = False
-                        else:
-                            content = ""
-                    elif in_think_block:
-                        if "</think>" in content:
-                            content = content.split("</think>", 1)[1]
-                            in_think_block = False
-                        else:
-                            content = ""
-
-                    if content:
-                        token_queue.put(content)
-                        token_count += 1
-
-                    # Check if done
-                    if data.get("done", False):
-                        break
+            if content:
+                token_queue.put(content)
+                token_count += 1
 
         if token_count > 0:
             token_queue.put(None)  # sentinel: stream complete
-            log.info("[%s] Ollama streamed %d tokens", session.session_id, token_count)
+            log.info("[%s] Streamed %d tokens via %s",
+                     session.session_id, token_count, orch.get_active_model_name("llm"))
             return True
 
     except Exception as e:
-        log.warning("[%s] Ollama stream failed: %s", session.session_id, e)
+        log.warning("[%s] Stream failed: %s", session.session_id, e)
 
     return False
 

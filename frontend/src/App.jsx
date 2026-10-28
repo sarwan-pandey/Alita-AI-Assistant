@@ -194,7 +194,7 @@ export default function App() {
   const [latestRole, setLatestRole] = useState("assistant");
   const [activeVoiceName, setActiveVoiceName] = useState(() => {
     const saved = localStorage.getItem("alita_selected_voice");
-    if (!saved || saved === "chatterbox_mj" || saved === "f5_mj_clone" || saved === "chattts_mj") {
+    if (!saved || saved !== "chatterbox_turbo_mj") {
       localStorage.setItem("alita_selected_voice", "chatterbox_turbo_mj");
       return "chatterbox_turbo_mj";
     }
@@ -214,6 +214,8 @@ export default function App() {
   const [activeSomMark, setActiveSomMark] = useState(null);
   const [contextChips, setContextChips] = useState([]);
   const [showPhoneCompanion, setShowPhoneCompanion] = useState(false);
+  const [phoneNotificationAlert, setPhoneNotificationAlert] = useState(null);
+  const [phoneCallAlert, setPhoneCallAlert] = useState(null);
 
   // ── Dynamic search state ────────────────────────────────────────────────
   const [searchHistory, setSearchHistory] = useState({});
@@ -441,6 +443,36 @@ export default function App() {
         // Route girlfriend-type nudges to emotion store for UI theming
         if (msg.suggestion?.subtype?.startsWith("girlfriend_")) {
           setActiveNudge(msg.suggestion);
+        }
+        break;
+
+      case "phone_notification_alert":
+        console.log("[Phone Notification Alert]", msg);
+        soundFX.playWhoosh?.();
+        setPhoneNotificationAlert(msg);
+        if (window._phoneNotifTimer) clearTimeout(window._phoneNotifTimer);
+        window._phoneNotifTimer = setTimeout(() => {
+          setPhoneNotificationAlert(null);
+        }, 8000);
+        break;
+
+      case "phone_call_alert":
+        console.log("[Phone Call Alert]", msg);
+        soundFX.playPing?.();
+        setPhoneCallAlert(msg);
+        break;
+
+      case "phone_call_dismiss":
+        console.log("[Phone Call Dismiss]", msg);
+        setPhoneCallAlert((prev) => (prev?.event_id === msg.event_id || !msg.event_id ? null : prev));
+        break;
+
+      case "phone_call_state":
+        console.log("[Phone Call State Changed]", msg);
+        if (msg.state === "ended") {
+          setPhoneCallAlert(null);
+        } else if (msg.state === "active") {
+          setPhoneCallAlert((prev) => (prev ? { ...prev, state: "active" } : null));
         }
         break;
 
@@ -1023,6 +1055,191 @@ export default function App() {
             />
           </div>
 
+
+          {/* Incoming / Active Phone Call Card */}
+          {phoneCallAlert && (
+            <div
+              className="phone-call-card"
+              style={{
+                position: "fixed",
+                top: "20px",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 10000,
+                padding: "16px 24px",
+                background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.92))",
+                border: "1px solid rgba(56, 189, 248, 0.5)",
+                borderRadius: "16px",
+                backdropFilter: "blur(24px)",
+                display: "flex",
+                alignItems: "center",
+                gap: "18px",
+                maxWidth: "540px",
+                width: "92%",
+                boxShadow: "0 16px 40px rgba(0, 0, 0, 0.5), 0 0 30px rgba(56, 189, 248, 0.25)",
+                animation: "slideDown 350ms cubic-bezier(0.16, 1, 0.3, 1)",
+              }}
+            >
+              <div style={{
+                width: "44px", height: "44px", borderRadius: "12px",
+                background: phoneCallAlert.state === "ringing"
+                  ? "linear-gradient(135deg, #0284c7, #0369a1)"
+                  : "linear-gradient(135deg, #16a34a, #15803d)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: "22px", flexShrink: 0,
+                boxShadow: "0 0 16px rgba(56, 189, 248, 0.4)",
+              }}>
+                📞
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2px" }}>
+                  <span style={{ fontSize: "0.68rem", fontWeight: 700, color: "#38bdf8", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                    {phoneCallAlert.state === "ringing" ? "Incoming Call..." : "Call in Progress"}
+                  </span>
+                  <span style={{ fontSize: "0.65rem", color: "rgba(148, 163, 184, 0.8)" }}>
+                    {phoneCallAlert.device || "Realme RMX5030"}
+                  </span>
+                </div>
+                <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {phoneCallAlert.caller || phoneCallAlert.number || "Unknown Caller"}
+                </div>
+                {phoneCallAlert.number && phoneCallAlert.caller && (
+                  <div style={{ fontSize: "0.75rem", color: "rgba(148, 163, 184, 0.9)" }}>
+                    {phoneCallAlert.number}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "10px", flexShrink: 0 }}>
+                {phoneCallAlert.state === "ringing" ? (
+                  <>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await fetch("/api/phone/call/answer", { method: "POST" });
+                          setPhoneCallAlert(prev => prev ? { ...prev, state: "active" } : null);
+                        } catch (err) {
+                          console.error("Failed to answer call:", err);
+                        }
+                      }}
+                      style={{
+                        background: "linear-gradient(135deg, #22c55e, #16a34a)",
+                        border: "none", borderRadius: "10px",
+                        color: "#fff", fontWeight: 600, fontSize: "0.82rem",
+                        padding: "8px 16px", cursor: "pointer",
+                        boxShadow: "0 4px 14px rgba(34, 197, 94, 0.35)",
+                        display: "flex", alignItems: "center", gap: "6px"
+                      }}
+                    >
+                      Answer
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await fetch("/api/phone/call/reject", { method: "POST" });
+                          setPhoneCallAlert(null);
+                        } catch (err) {
+                          console.error("Failed to reject call:", err);
+                        }
+                      }}
+                      style={{
+                        background: "linear-gradient(135deg, #ef4444, #dc2626)",
+                        border: "none", borderRadius: "10px",
+                        color: "#fff", fontWeight: 600, fontSize: "0.82rem",
+                        padding: "8px 16px", cursor: "pointer",
+                        boxShadow: "0 4px 14px rgba(239, 68, 68, 0.35)",
+                        display: "flex", alignItems: "center", gap: "6px"
+                      }}
+                    >
+                      Reject
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch("/api/phone/call/end", { method: "POST" });
+                        setPhoneCallAlert(null);
+                      } catch (err) {
+                        console.error("Failed to end call:", err);
+                      }
+                    }}
+                    style={{
+                      background: "linear-gradient(135deg, #ef4444, #dc2626)",
+                      border: "none", borderRadius: "10px",
+                      color: "#fff", fontWeight: 600, fontSize: "0.82rem",
+                      padding: "8px 16px", cursor: "pointer",
+                      boxShadow: "0 4px 14px rgba(239, 68, 68, 0.35)",
+                      display: "flex", alignItems: "center", gap: "6px"
+                    }}
+                  >
+                    Hang Up
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Real-Time Phone Notification Alert Toast */}
+          {phoneNotificationAlert && (
+            <div
+              className="phone-notification-toast"
+              onClick={() => setPhoneNotificationAlert(null)}
+              style={{
+                position: "fixed",
+                top: "76px",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 9999,
+                padding: "12px 20px",
+                background: "rgba(15, 23, 42, 0.88)",
+                border: "1px solid rgba(34, 197, 94, 0.45)",
+                borderRadius: "14px",
+                backdropFilter: "blur(20px)",
+                display: "flex",
+                alignItems: "center",
+                gap: "14px",
+                maxWidth: "520px",
+                width: "90%",
+                boxShadow: "0 12px 36px rgba(0, 0, 0, 0.4), 0 0 20px rgba(34, 197, 94, 0.2)",
+                cursor: "pointer",
+                animation: "slideDown 350ms cubic-bezier(0.16, 1, 0.3, 1)",
+              }}
+            >
+              <div style={{
+                width: "36px", height: "36px", borderRadius: "10px",
+                background: "linear-gradient(135deg, #25D366, #128C7E)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: "18px", flexShrink: 0
+              }}>
+                💬
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2px" }}>
+                  <span style={{ fontSize: "0.68rem", fontWeight: 700, color: "#4ade80", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                    {phoneNotificationAlert.app_name || "WhatsApp Business"}
+                  </span>
+                  <span style={{ fontSize: "0.65rem", color: "rgba(148, 163, 184, 0.8)" }}>
+                    {phoneNotificationAlert.timestamp ? new Date(phoneNotificationAlert.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ""}
+                  </span>
+                </div>
+                <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "#f8fafc", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {phoneNotificationAlert.sender}
+                </div>
+                <div style={{ fontSize: "0.75rem", color: "rgba(203, 213, 225, 0.85)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {phoneNotificationAlert.text}
+                </div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); setPhoneNotificationAlert(null); }}
+                style={{
+                  background: "transparent", border: "none", color: "rgba(148, 163, 184, 0.7)",
+                  fontSize: "14px", cursor: "pointer", padding: "4px"
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
           {/* Error toast */}
           {errorToast && (

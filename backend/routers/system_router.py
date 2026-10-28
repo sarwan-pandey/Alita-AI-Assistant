@@ -49,21 +49,21 @@ async def health_check():
     except Exception:
         pass
 
-    # Detect active LLM engine dynamically
-    llm_info = "ollama"
+    # Detect active LLM engine dynamically via Provider Orchestrator
     try:
-        from ollama_client import is_ollama_running, get_model_name
-        model_name = get_model_name()
-        if is_ollama_running():
-            llm_info = f"ollama ({model_name})"
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
+        model_name = orch.get_active_model_name("llm")
+        if orch.is_llm_ready():
+            llm_info = f"active ({model_name})"
         elif getattr(settings, "get_all_gemini_keys", None) and settings.get_all_gemini_keys():
             llm_info = f"gemini ({getattr(settings, 'gemini_model', 'gemini-2.0-flash')})"
         elif getattr(settings, "get_all_groq_keys", None) and settings.get_all_groq_keys():
             llm_info = f"groq ({getattr(settings, 'groq_model', 'llama-3.3-70b-versatile')})"
         else:
-            llm_info = f"ollama ({model_name}) [waiting for serve]"
+            llm_info = f"{model_name} [offline/waiting]"
     except Exception:
-        llm_info = "ollama"
+        llm_info = "llm"
 
     return {
         "status": "ok",
@@ -183,31 +183,14 @@ async def export_training_endpoint(request: Request):
 
 @system_router.post("/api/vision")
 async def local_vision(req: VisionRequest, request: Request):
-    """Analyze an image using local LLaVA model via Ollama."""
+    """Analyze an image using Provider Orchestrator (P1)."""
     from auth_deps import require_auth
     await require_auth(request)
 
     try:
-        from ollama_client import OLLAMA_NATIVE_URL
-        vision_model = os.getenv("OLLAMA_VISION_MODEL", "qwen3:4b-instruct")
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{OLLAMA_NATIVE_URL}/api/chat",
-                json={
-                    "model": vision_model,
-                    "messages": [{
-                        "role": "user",
-                        "content": req.prompt,
-                        "images": [req.image_b64],
-                    }],
-                    "stream": False,
-                    "options": {"num_predict": 500},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            description = data.get("message", {}).get("content", "")
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
+        description = orch.analyze_vision(prompt=req.prompt, image_b64=req.image_b64)
 
         if not description:
             raise HTTPException(status_code=500, detail="Vision model returned empty response")

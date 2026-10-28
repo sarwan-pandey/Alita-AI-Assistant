@@ -107,11 +107,12 @@ class BrowserController:
         url = info.get("url", "")
 
         if not info.get("is_browser"):
-            # Fallback to general screen OCR/Vision if not in a browser
-            from engines.vision_engine import vision_engine
-            return vision_engine.analyze_screen(
+            # Fallback to general screen OCR/Vision if not in a browser via Provider Orchestrator (P1)
+            from engines.provider_orchestrator import get_provider_orchestrator
+            res = get_provider_orchestrator().analyze_vision(
                 prompt="Summarize the key information visible on the screen in 3 clear bullet points."
             )
+            return res or ""
 
         # If we have the live URL, fetch clean DOM directly
         if url:
@@ -135,11 +136,12 @@ class BrowserController:
             except Exception as e:
                 logger.debug(f"[BrowserController] URL fetch failed: {e}")
 
-        # Fallback to Vision/Screen OCR of the active browser window
-        from engines.vision_engine import vision_engine
-        return vision_engine.analyze_screen(
+        # Fallback to Vision/Screen OCR of the active browser window via Provider Orchestrator (P1)
+        from engines.provider_orchestrator import get_provider_orchestrator
+        res = get_provider_orchestrator().analyze_vision(
             prompt=f"The user is reading the webpage '{title}'. Summarize the key main points and takeaways in 3 concise sentences."
         )
+        return res or ""
 
     def extract_page_data(self, data_type: str = "links") -> str:
         """

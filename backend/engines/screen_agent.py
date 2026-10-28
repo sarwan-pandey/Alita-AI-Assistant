@@ -65,14 +65,19 @@ except ImportError:
 MAX_STEPS = 20
 ACTION_DELAY = 0.3  # seconds between actions
 
-# ── Text generation (for compose tasks) ──────────────────────────────────────
-HAS_OLLAMA = False
-try:
-    from ollama_client import ollama_chat  # type: ignore[import]
-    HAS_OLLAMA = True
-except ImportError:
-    ollama_chat = None  # type: ignore[assignment]
-    HAS_OLLAMA = False
+# ── Text generation (for compose tasks) via Provider Orchestrator (P1) ────────
+def _screen_agent_llm_chat(user_prompt: str, system_prompt: str = "", max_tokens: int = 600, temperature: float = 0.7) -> Optional[str]:
+    try:
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+        return orch.chat(messages=messages, max_tokens=max_tokens, temperature=temperature)
+    except Exception as exc:
+        logger.warning(f"[ScreenAgent] LLM generation failed: {exc}")
+        return None
 
 
 def _build_compose_prompt(topic: str, style: str, max_words: int = 300) -> tuple[str, str]:
@@ -198,29 +203,26 @@ def _generate_text(topic: str, style: str, max_words: int = 300) -> str:
                 f"HAS_OLLAMA={HAS_OLLAMA}")
     logger.debug(f"[ScreenAgent] Prompt: {user_prompt[:100]}...")
 
-    # Try Ollama (local Qwen3 4B Q4)
-    if HAS_OLLAMA:
-        try:
-            logger.info("[ScreenAgent] Attempting Ollama generation...")
-            text = ollama_chat(
-                prompt=user_prompt,
-                system=system_prompt,
-                max_tokens=max_words * 2,
-                temperature=0.7,
-            )
+    # Try LLM generation via Provider Orchestrator
+    try:
+        logger.info("[ScreenAgent] Attempting LLM generation via Provider Orchestrator...")
+        text = _screen_agent_llm_chat(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_words * 2,
+            temperature=0.7,
+        )
+        if text:
+            text = _clean_llm_output(text)
             if text:
-                text = _clean_llm_output(text)
-                if text:
-                    logger.info(f"[ScreenAgent] ✓ Generated {len(text)} chars via Ollama")
-                    return text
-                else:
-                    logger.warning("[ScreenAgent] Ollama returned empty text after cleaning")
+                logger.info(f"[ScreenAgent] ✓ Generated {len(text)} chars via LLM")
+                return text
             else:
-                logger.warning("[ScreenAgent] Ollama returned empty text")
-        except Exception as e:
-            logger.warning(f"[ScreenAgent] Ollama generation failed: {e}")
-    else:
-        logger.info("[ScreenAgent] ollama_client not available — skipping")
+                logger.warning("[ScreenAgent] LLM returned empty text after cleaning")
+        else:
+            logger.warning("[ScreenAgent] LLM returned empty text")
+    except Exception as e:
+        logger.warning(f"[ScreenAgent] LLM generation failed: {e}")
 
     # Last resort: simple template
     logger.warning("[ScreenAgent] Ollama failed — using template fallback")
@@ -955,10 +957,10 @@ def _exec_click(params: Dict[str, str], notify: Callable) -> str:
         except Exception as e:
             logger.warning(f"[ScreenAgent] Visual click failed: {e}")
 
-    # Strategy 3: Multimodal Vision Engine Coordinate Localization
+    # Strategy 3: Multimodal Vision Coordinate Localization via Provider Orchestrator (P1)
     try:
-        from engines.vision_engine import vision_engine
-        loc = vision_engine.locate_element(target)
+        from engines.provider_orchestrator import get_provider_orchestrator
+        loc = get_provider_orchestrator().locate_element(target)
         if loc and loc.get("found"):
             screen_w, screen_h = pyautogui.size()
             norm_x = loc.get("x", 0.5)

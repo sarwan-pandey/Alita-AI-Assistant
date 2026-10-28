@@ -205,8 +205,28 @@ async def phone_websocket_endpoint(websocket: WebSocket):
 
             # 3. Phone Notification Intercepted
             elif msg_type == "phone_notification":
-                phone_orchestrator.record_notification(msg)
-                logger.info(f"Notification from {msg.get('package')}: {msg.get('title')}: {msg.get('text')}")
+                try:
+                    from engines.notification_dispatcher import notification_dispatcher
+                    await notification_dispatcher.handle_incoming_notification(msg)
+                except Exception as ne:
+                    logger.error(f"Error dispatching phone notification: {ne}")
+                    phone_orchestrator.record_notification(msg)
+
+            # 3.1 Incoming Phone Call (Phase 7D)
+            elif msg_type == "incoming_call":
+                try:
+                    from engines.notification_dispatcher import notification_dispatcher
+                    await notification_dispatcher.handle_incoming_call(msg)
+                except Exception as ce:
+                    logger.error(f"Error handling incoming call: {ce}")
+
+            # 3.2 Phone Call State Transition (Phase 7D)
+            elif msg_type == "call_state_changed":
+                try:
+                    from engines.notification_dispatcher import notification_dispatcher
+                    await notification_dispatcher.handle_call_state_changed(msg)
+                except Exception as se:
+                    logger.error(f"Error handling call state change: {se}")
 
             # 4. Command Result Reply
             elif msg_type == "command_result":
@@ -310,6 +330,69 @@ async def execute_natural_mobile_task(req: NaturalTaskRequest):
 
     res = await phone_orchestrator.execute_natural_task(req.instruction)
     return res
+
+
+@phone_router.post("/api/phone/call/answer")
+async def answer_phone_call():
+    """Answers an incoming ringing phone call."""
+    if not bridge_manager.is_connected:
+        raise HTTPException(status_code=503, detail="Android companion is offline")
+    return await phone_orchestrator.answer_call()
+
+
+@phone_router.post("/api/phone/call/reject")
+async def reject_phone_call():
+    """Declines an incoming ringing phone call."""
+    if not bridge_manager.is_connected:
+        raise HTTPException(status_code=503, detail="Android companion is offline")
+    return await phone_orchestrator.reject_call()
+
+
+@phone_router.post("/api/phone/call/end")
+async def end_phone_call():
+    """Ends the active phone call."""
+    if not bridge_manager.is_connected:
+        raise HTTPException(status_code=503, detail="Android companion is offline")
+    return await phone_orchestrator.end_call()
+
+
+@phone_router.get("/api/phone/call/status")
+async def get_phone_call_status():
+    """Returns current active telephony call status and bridge connection."""
+    from engines.notification_dispatcher import notification_dispatcher
+    return {
+        "connected": bridge_manager.is_connected,
+        "active_call": notification_dispatcher.active_call
+    }
+
+
+@phone_router.post("/api/phone/test/simulate-call")
+async def simulate_incoming_call(caller: str = "Rahul", number: str = "+919876543210"):
+    """Testing helper: simulates an incoming ringing call from Android."""
+    from engines.notification_dispatcher import notification_dispatcher
+    event = {
+        "type": "incoming_call",
+        "event_id": f"sim_call_{int(time.time() * 1000)}",
+        "number": number,
+        "caller": caller,
+        "is_known_contact": True,
+        "state": "ringing",
+        "timestamp": int(time.time() * 1000),
+    }
+    return await notification_dispatcher.handle_incoming_call(event)
+
+
+@phone_router.post("/api/phone/test/simulate-call-end")
+async def simulate_call_end(event_id: str):
+    """Testing helper: simulates call termination from Android."""
+    from engines.notification_dispatcher import notification_dispatcher
+    event = {
+        "type": "call_state_changed",
+        "event_id": event_id,
+        "state": "ended",
+        "timestamp": int(time.time() * 1000),
+    }
+    return await notification_dispatcher.handle_call_state_changed(event)
 
 
 @phone_router.get("/api/phone/download-apk")

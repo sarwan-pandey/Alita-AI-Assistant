@@ -761,14 +761,15 @@ async def generate_intel_brief(req: BriefRequest):
         brief_text = None
         source = "ollama"
 
-        # 1. Try local Ollama first (zero API cost, 100% offline)
+        # 1. Try Provider Orchestrator (P1)
         try:
-            from ollama_client import ollama_chat, is_ollama_running
-            if is_ollama_running():
-                brief_text = ollama_chat(prompt=prompt, max_tokens=600)
-                source = "ollama"
-        except Exception as ollama_err:
-            log.debug("Ollama intel brief failed: %s", ollama_err)
+            from engines.provider_orchestrator import get_provider_orchestrator
+            orch = get_provider_orchestrator()
+            brief_text = orch.chat(messages=[{"role": "user", "content": prompt}], max_tokens=600)
+            if brief_text:
+                source = orch.get_active_model_name("llm")
+        except Exception as llm_err:
+            log.debug("Provider intel brief failed: %s", llm_err)
 
         # 2. Fallback to Gemini if API key configured
         if not brief_text:

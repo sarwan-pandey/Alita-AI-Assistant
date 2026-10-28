@@ -1,7 +1,7 @@
 """
-Core Audio Pipeline — ChatTTS/F5-TTS Dispatch, Instant Backchanneling & Speech Rate Adaptation
-==============================================================================================
-Routes speech generation between ChatTTS (conversational neural) and F5-TTS (diffusion voice clone).
+Core Audio Pipeline — TTS Dispatch, Instant Backchanneling & Speech Rate Adaptation
+====================================================================================
+Routes speech generation via Provider Orchestrator (Chatterbox Multilingual / Turbo).
 Provides instant micro-filler caching (<50ms) and dynamic rate adjustment based on user cadence.
 """
 

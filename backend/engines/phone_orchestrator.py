@@ -238,6 +238,14 @@ class PhoneOrchestrator:
         """End the current active phone call."""
         return await self._dispatch({"command": "end_call"})
 
+    async def answer_call(self) -> Dict[str, Any]:
+        """Answer the ringing incoming call."""
+        return await self._dispatch({"command": "answer_call"})
+
+    async def reject_call(self) -> Dict[str, Any]:
+        """Reject/decline the ringing incoming call."""
+        return await self._dispatch({"command": "reject_call"})
+
     async def send_sms(self, number: Optional[str] = None, contact_name: Optional[str] = None, message: str = "") -> Dict[str, Any]:
         """Send an SMS text message."""
         cmd: Dict[str, Any] = {"command": "send_sms", "message": message}

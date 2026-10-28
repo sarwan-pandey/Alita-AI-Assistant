@@ -606,24 +606,27 @@ class BlogPublishWorkflow(BaseWorkflow):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _generate_with_llm(prompt: str) -> str:
-    """Generate text using local Ollama (Qwen3-8B)."""
+    """Generate text using Provider Orchestrator (P1)."""
     try:
         import asyncio
-        from ollama_client import ollama_chat  # type: ignore[import]
+        from engines.provider_orchestrator import get_provider_orchestrator
+        orch = get_provider_orchestrator()
 
-        # ollama_chat is synchronous — run in thread pool to stay async
+        messages = [
+            {"role": "system", "content": "You are a professional SEO blog writer."},
+            {"role": "user", "content": prompt},
+        ]
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: ollama_chat(
-                prompt=prompt,
-                system="You are a professional SEO blog writer.",
+            lambda: orch.chat(
+                messages=messages,
                 max_tokens=4000,
                 temperature=0.8,
             ),
         )
         return result or ""
     except Exception as e:
-        logger.error("[BlogWorkflow] Ollama LLM failed: %s", e)
+        logger.error("[BlogWorkflow] Provider LLM failed: %s", e)
         return ""
 

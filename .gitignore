@@ -63,6 +63,11 @@ frontend/node_modules/
 
 # ── Build output ──────────────────────────────────
 frontend/dist/
+.gradle/
+android_companion/.gradle/
+android_companion/app/build/
+android_companion/build/
+local.properties
 
 # ── OS files ──────────────────────────────────────
 .DS_Store

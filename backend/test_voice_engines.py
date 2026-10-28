@@ -1,7 +1,6 @@
 """
 Integration and Unit Tests for Emotional Local Voice Models:
-- ChatTTS (Default for MJ with [laugh] and [sigh] emotional prosody)
-- F5-TTS (Flow-matching diffusion for zero-shot voice cloning)
+- Chatterbox Turbo (Default for MJ with [laugh] and [sigh] emotional prosody)
 - Persistent voice preference across sessions via UserProfile
 - Text cleaning and emotional oral tag translation
 """
